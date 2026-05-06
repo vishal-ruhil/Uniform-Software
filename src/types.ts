@@ -1,3 +1,14 @@
+export type UserRole = 'Admin' | 'Editor' | 'Viewer';
+
+export interface User {
+  id: string;
+  email: string;
+  name: string;
+  password?: string;
+  role: UserRole;
+  createdAt: string;
+}
+
 export interface SizePricing {
   [size: string]: number;
 }
@@ -15,6 +26,7 @@ export interface SaleRecord {
   studentClass: string;
   items: CartItem[];
   totalAmount: number;
+  discount?: number;
   date: string;
   timestamp: string;
   paymentMode: PaymentMode;

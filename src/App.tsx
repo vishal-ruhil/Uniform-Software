@@ -11,10 +11,11 @@ import {
   History,
   TrendingUp,
   Package,
-  User,
+  User as UserIcon,
   Hash,
   Plus,
   X,
+  Pencil,
   Sliders,
   Calendar,
   Type,
@@ -23,10 +24,13 @@ import {
   ChevronRight,
   Search,
   ChevronDown,
+  Check,
+  Info,
   LogIn,
   LogOut,
   Mail,
-  Lock
+  Lock,
+  UserCircle
 } from 'lucide-react';
 import { 
   LineChart, 
@@ -43,89 +47,61 @@ import {
   Cell
 } from 'recharts';
 import { motion, AnimatePresence } from 'motion/react';
-import { 
-  collection, 
-  onSnapshot, 
-  addDoc, 
-  updateDoc, 
-  deleteDoc, 
-  doc, 
-  setDoc, 
-  getDoc,
-  getDocs,
-  query,
-  orderBy,
-  getDocFromServer
-} from 'firebase/firestore';
-import { 
-  signInWithPopup, 
-  GoogleAuthProvider, 
-  onAuthStateChanged, 
-  signOut,
-  User as FirebaseUser,
-  createUserWithEmailAndPassword,
-  signInWithEmailAndPassword,
-  sendEmailVerification
-} from 'firebase/auth';
-import { db, auth } from './firebase';
-import { Pricing, SaleRecord, SizePricing, CartItem, CustomField, PaymentMode } from './types';
+import { Pricing, SaleRecord, SizePricing, CartItem, CustomField, PaymentMode, UserRole, User } from './types';
 import { DEFAULT_PRICING, CLASSES } from './constants';
 
-// --- Error Handling ---
-enum OperationType {
-  CREATE = 'create',
-  UPDATE = 'update',
-  DELETE = 'delete',
-  LIST = 'list',
-  GET = 'get',
-  WRITE = 'write',
-}
-
-interface FirestoreErrorInfo {
-  error: string;
-  operationType: OperationType;
-  path: string | null;
-  authInfo: {
-    userId?: string | null;
-    email?: string | null;
-    emailVerified?: boolean | null;
-    isAnonymous?: boolean | null;
-  }
-}
-
-function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
-  const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
-    authInfo: {
-      userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email,
-      emailVerified: auth.currentUser?.emailVerified,
-      isAnonymous: auth.currentUser?.isAnonymous,
-    },
-    operationType,
-    path
-  };
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
-}
+const INITIAL_ADMIN: User = {
+  id: 'admin-1',
+  email: 'ruhilvishal123@gmail.com',
+  name: 'Admin User',
+  password: 'Password@1',
+  role: 'Admin',
+  createdAt: new Date().toISOString()
+};
 
 export default function App() {
   // --- Auth State ---
-  const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [user, setUser] = useState<User | null>(null);
+  const [users, setUsers] = useState<User[]>(() => {
+    const saved = localStorage.getItem('uniform_users');
+    return saved ? JSON.parse(saved) : [INITIAL_ADMIN];
+  });
+  const [confirmState, setConfirmState] = useState<{ 
+    isOpen: boolean; 
+    title: string; 
+    message: string; 
+    onConfirm: () => void;
+    type: 'danger' | 'info'
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: () => {},
+    type: 'danger'
+  });
   const [authLoading, setAuthLoading] = useState(true);
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
   
-  const [authMode, setAuthMode] = useState<'google' | 'email-signin' | 'email-signup'>('google');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [verificationSent, setVerificationSent] = useState(false);
+  const [editingRecord, setEditingRecord] = useState<SaleRecord | null>(null);
+  const [selectedRecordIds, setSelectedRecordIds] = useState<string[]>([]);
 
   // --- State ---
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'pricing' | 'sales' | 'ledger' | 'reports'>('dashboard');
-  const [pricing, setPricing] = useState<Pricing>(DEFAULT_PRICING);
-  const [records, setRecords] = useState<SaleRecord[]>([]);
-  const [customFields, setCustomFields] = useState<CustomField[]>([]);
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'pricing' | 'sales' | 'ledger' | 'reports' | 'profile' | 'admin'>('dashboard');
+  const [pricing, setPricing] = useState<Pricing>(() => {
+    const saved = localStorage.getItem('uniform_pricing');
+    return saved ? JSON.parse(saved) : DEFAULT_PRICING;
+  });
+  const [records, setRecords] = useState<SaleRecord[]>(() => {
+    const saved = localStorage.getItem('uniform_records');
+    return saved ? JSON.parse(saved) : [];
+  });
+  const [customFields, setCustomFields] = useState<CustomField[]>(() => {
+    const saved = localStorage.getItem('uniform_custom_fields');
+    return saved ? JSON.parse(saved) : [];
+  });
 
   const [showConfig, setShowConfig] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -141,7 +117,9 @@ export default function App() {
   const [studentName, setStudentName] = useState('');
   const [studentClass, setStudentClass] = useState(CLASSES[0]);
   const [generalNotes, setGeneralNotes] = useState('');
+  const [discountAmount, setDiscountAmount] = useState<string>('');
   const [cart, setCart] = useState<CartItem[]>([]);
+  const [showConfirmation, setShowConfirmation] = useState(false);
   
   // --- Filter State ---
   const [searchQuery, setSearchQuery] = useState('');
@@ -166,64 +144,25 @@ export default function App() {
 
   // --- Effects ---
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      setAuthLoading(false);
-      
-      if (u) {
-        // Test connection
-        getDocFromServer(doc(db, 'test', 'connection')).catch(err => {
-          if (err.message?.includes('offline')) {
-             console.error("Please check your Firebase configuration.");
-          }
-        });
-      }
-    });
-    return () => unsubscribe();
+    const savedUser = localStorage.getItem('uniform_user');
+    if (savedUser) {
+      setUser(JSON.parse(savedUser));
+    }
+    setAuthLoading(false);
   }, []);
 
-  // Real-time pricing sync
+  // Save changes to localStorage
   useEffect(() => {
-    if (!user) return;
-    const unsub = onSnapshot(collection(db, 'pricing'), (snapshot) => {
-      const newPricing: Pricing = {};
-      snapshot.forEach(doc => {
-        const data = doc.data();
-        newPricing[data.itemName] = data.sizes;
-      });
-      if (Object.keys(newPricing).length > 0) {
-        setPricing(newPricing);
-      }
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'pricing'));
-    return () => unsub();
-  }, [user]);
+    localStorage.setItem('uniform_pricing', JSON.stringify(pricing));
+  }, [pricing]);
 
-  // Real-time custom fields sync
   useEffect(() => {
-    if (!user) return;
-    const unsub = onSnapshot(collection(db, 'customFields'), (snapshot) => {
-      const fields: CustomField[] = [];
-      snapshot.forEach(doc => {
-        fields.push({ id: doc.id, ...doc.data() } as CustomField);
-      });
-      setCustomFields(fields);
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'customFields'));
-    return () => unsub();
-  }, [user]);
+    localStorage.setItem('uniform_records', JSON.stringify(records));
+  }, [records]);
 
-  // Real-time sales records sync
   useEffect(() => {
-    if (!user) return;
-    const q = query(collection(db, 'sales'), orderBy('timestamp', 'desc'));
-    const unsub = onSnapshot(q, (snapshot) => {
-      const recs: SaleRecord[] = [];
-      snapshot.forEach(doc => {
-        recs.push({ id: doc.id, ...doc.data() } as SaleRecord);
-      });
-      setRecords(recs);
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'sales'));
-    return () => unsub();
-  }, [user]);
+    localStorage.setItem('uniform_custom_fields', JSON.stringify(customFields));
+  }, [customFields]);
 
   // Handle auto-increment for Sr. No.
   useEffect(() => {
@@ -235,6 +174,20 @@ export default function App() {
     }
   }, [records]);
 
+  useEffect(() => {
+    localStorage.setItem('uniform_users', JSON.stringify(users));
+  }, [users]);
+
+  // Permissions helper
+  const can = (action: 'add' | 'edit' | 'delete' | 'manage-users') => {
+    if (!user) return false;
+    if (user.role === 'Admin') return true;
+    if (user.role === 'Editor') {
+      return action !== 'manage-users';
+    }
+    return false; // Viewer has no write access
+  };
+
   // --- Computed ---
   const currentRate = useMemo(() => {
     return pricing[newItem.item]?.[newItem.size] || 0;
@@ -245,6 +198,11 @@ export default function App() {
   const cartTotal = useMemo(() => {
     return cart.reduce((sum, item) => sum + (item.qty * item.rate), 0);
   }, [cart]);
+
+  const finalPayable = useMemo(() => {
+    const discount = Number(discountAmount) || 0;
+    return Math.max(0, cartTotal - discount);
+  }, [cartTotal, discountAmount]);
 
   const grandTotal = useMemo(() => {
     return records.reduce((sum, r) => sum + r.totalAmount, 0);
@@ -321,126 +279,97 @@ export default function App() {
   }, [records]);
 
   // --- Handlers ---
-  const loginWithGoogle = async () => {
-    setLoginLoading(true);
-    setLoginError(null);
-    const provider = new GoogleAuthProvider();
-    try {
-      await signInWithPopup(auth, provider);
-    } catch (error: any) {
-      console.error("Login failed:", error);
-      if (error.code === 'auth/popup-closed-by-user') {
-        setLoginError("Sign-in popup was closed before completion. Please try again.");
-      } else if (error.code === 'auth/popup-blocked') {
-        setLoginError("Sign-in popup was blocked by your browser. Please allow popups for this site.");
-      } else {
-        setLoginError(error.message || "An error occurred during sign-in.");
-      }
-    } finally {
-      setLoginLoading(false);
-    }
-  };
-
   const handleEmailAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginLoading(true);
     setLoginError(null);
     
-    try {
-      if (authMode === 'email-signup') {
-        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-        await sendEmailVerification(userCredential.user);
-        setVerificationSent(true);
-      } else {
-        await signInWithEmailAndPassword(auth, email, password);
+    // Simulate network delay
+    await new Promise(resolve => setTimeout(resolve, 800));
+
+    const foundUser = users.find(u => u.email === email && u.password === password);
+    if (foundUser) {
+      setUser(foundUser);
+      localStorage.setItem('uniform_user', JSON.stringify(foundUser));
+    } else {
+      setLoginError("Invalid email or password. Please use correct credentials.");
+    }
+    setLoginLoading(false);
+  };
+
+  const logout = () => {
+    setUser(null);
+    localStorage.removeItem('uniform_user');
+    setActiveTab('dashboard');
+  };
+
+  const handlePriceChange = (item: string, size: string, value: number) => {
+    setPricing(prev => ({
+      ...prev,
+      [item]: {
+        ...prev[item],
+        [size]: value
       }
-    } catch (error: any) {
-      console.error("Email auth failed:", error);
-      setLoginError(error.message || "Authentication failed. Please check your credentials.");
-    } finally {
-      setLoginLoading(false);
-    }
+    }));
   };
 
-  const logout = async () => {
-    try {
-      await signOut(auth);
-      setRecords([]);
-      setPricing(DEFAULT_PRICING);
-      setCustomFields([]);
-      setVerificationSent(false);
-      setAuthMode('google');
-    } catch (error) {
-      console.error("Logout failed:", error);
-    }
-  };
-
-  const handlePriceChange = async (item: string, size: string, value: number) => {
-    const newSizes = { ...pricing[item], [size]: value };
-    try {
-      await setDoc(doc(db, 'pricing', item), {
-        itemName: item,
-        sizes: newSizes
-      }, { merge: true });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, `pricing/${item}`);
-    }
-  };
-
-  const renameItem = async (oldName: string, newName: string) => {
+  const renameItem = (oldName: string, newName: string) => {
     const cleanName = newName.trim();
     if (!cleanName || cleanName === oldName || pricing[cleanName]) return;
     
-    try {
-      const sizes = pricing[oldName];
-      await setDoc(doc(db, 'pricing', cleanName), { itemName: cleanName, sizes });
-      await deleteDoc(doc(db, 'pricing', oldName));
-      
-      if (newItem.item === oldName) {
-        setNewItem(p => ({ ...p, item: cleanName }));
-      }
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, `pricing/${cleanName}`);
+    setPricing(prev => {
+      const next = { ...prev };
+      const sizes = next[oldName];
+      next[cleanName] = sizes;
+      delete next[oldName];
+      return next;
+    });
+
+    if (newItem.item === oldName) {
+      setNewItem(p => ({ ...p, item: cleanName }));
     }
   };
 
-  const renameSize = async (item: string, oldSize: string, newSize: string) => {
+  const renameSize = (item: string, oldSize: string, newSize: string) => {
     const cleanSize = newSize.trim();
     if (!cleanSize || cleanSize === oldSize || pricing[item][cleanSize]) return;
     
-    const newSizes = { ...pricing[item] };
-    const price = newSizes[oldSize];
-    delete newSizes[oldSize];
-    newSizes[cleanSize] = price;
-
-    try {
-      await updateDoc(doc(db, 'pricing', item), { sizes: newSizes });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `pricing/${item}`);
-    }
+    setPricing(prev => {
+      const next = { ...prev };
+      const itemSizes = { ...next[item] };
+      const price = itemSizes[oldSize];
+      delete itemSizes[oldSize];
+      itemSizes[cleanSize] = price;
+      next[item] = itemSizes;
+      return next;
+    });
   };
 
-  const addNewItem = async (e: React.FormEvent<HTMLFormElement>) => {
+  const addNewItem = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
     const itemName = (formData.get('itemName') as string).trim();
     if (!itemName || pricing[itemName]) return;
     
-    try {
-      await setDoc(doc(db, 'pricing', itemName), {
-        itemName,
-        sizes: {}
-      });
-      (e.target as HTMLFormElement).reset();
-    } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, `pricing/${itemName}`);
-    }
+    setPricing(prev => ({
+      ...prev,
+      [itemName]: {}
+    }));
+    (e.target as HTMLFormElement).reset();
   };
 
-  const deleteItem = async (item: string) => {
-    if (confirm(`Delete entire item "${item}" and all its associated pricing?`)) {
-      try {
-        await deleteDoc(doc(db, 'pricing', item));
+  const deleteItem = (item: string) => {
+    setConfirmState({
+      isOpen: true,
+      title: 'Delete Category',
+      message: `Are you sure you want to delete "${item}"? This will remove all associated sizes and pricing configurations.`,
+      onConfirm: () => {
+        setPricing(prev => {
+          const next = { ...prev };
+          delete next[item];
+          return next;
+        });
+
         if (newItem.item === item) {
           const nextPricing = { ...pricing };
           delete nextPricing[item];
@@ -451,13 +380,12 @@ export default function App() {
             size: firstAvailable ? Object.keys(nextPricing[firstAvailable])[0] || '' : ''
           }));
         }
-      } catch (err) {
-        handleFirestoreError(err, OperationType.DELETE, `pricing/${item}`);
-      }
-    }
+      },
+      type: 'danger'
+    });
   };
 
-  const addNewSize = async (item: string, e: React.FormEvent<HTMLFormElement>) => {
+  const addNewSize = (item: string, e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
     const size = (formData.get('size') as string).trim();
@@ -465,26 +393,26 @@ export default function App() {
     
     if (!size) return;
 
-    try {
-      const newSizes = { ...pricing[item], [size]: price };
-      await updateDoc(doc(db, 'pricing', item), { sizes: newSizes });
-      (e.target as HTMLFormElement).reset();
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `pricing/${item}`);
-    }
+    setPricing(prev => ({
+      ...prev,
+      [item]: {
+        ...prev[item],
+        [size]: price
+      }
+    }));
+    (e.target as HTMLFormElement).reset();
   };
 
-  const deleteSize = async (item: string, size: string) => {
-    try {
-      const newSizes = { ...pricing[item] };
-      delete newSizes[size];
-      await updateDoc(doc(db, 'pricing', item), { sizes: newSizes });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `pricing/${item}`);
-    }
+  const deleteSize = (item: string, size: string) => {
+    setPricing(prev => ({
+      ...prev,
+      [item]: Object.fromEntries(
+        Object.entries(prev[item]).filter(([s]) => s !== size)
+      )
+    }));
   };
 
-  const addCustomField = async (e: React.FormEvent<HTMLFormElement>) => {
+  const addCustomField = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
     const label = (formData.get('label') as string).trim();
@@ -498,37 +426,24 @@ export default function App() {
         return;
     }
 
-    try {
-      await addDoc(collection(db, 'customFields'), {
-        label,
-        type,
-        required
-      });
-      (e.target as HTMLFormElement).reset();
-    } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, 'customFields');
-    }
+    setCustomFields(prev => [
+      ...prev,
+      { id: crypto.randomUUID(), label, type, required }
+    ]);
+    (e.target as HTMLFormElement).reset();
   };
 
-  const removeCustomField = async (id: string) => {
-    try {
-      await deleteDoc(doc(db, 'customFields', id));
-      setCustomValues(prev => {
-        const next = { ...prev };
-        delete next[id];
-        return next;
-      });
-    } catch (err) {
-      handleFirestoreError(err, OperationType.DELETE, `customFields/${id}`);
-    }
+  const removeCustomField = (id: string) => {
+    setCustomFields(prev => prev.filter(f => f.id !== id));
+    setCustomValues(prev => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
   };
 
-  const updateCustomField = async (id: string, updates: Partial<CustomField>) => {
-    try {
-      await updateDoc(doc(db, 'customFields', id), updates);
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `customFields/${id}`);
-    }
+  const updateCustomField = (id: string, updates: Partial<CustomField>) => {
+    setCustomFields(prev => prev.map(f => f.id === id ? { ...f, ...updates } : f));
   };
 
   const addToCart = (e: React.MouseEvent | React.FormEvent) => {
@@ -554,9 +469,11 @@ export default function App() {
       size: newItem.size,
       qty: newItem.qty,
       rate: currentRate,
-      notes: newItem.notes.trim() || undefined,
       customData: { ...customValues }
     };
+    if (newItem.notes.trim()) {
+      item.notes = newItem.notes.trim();
+    }
     setCart(prev => [...prev, item]);
     setNewItem(prev => ({ ...prev, qty: 1, notes: '' }));
     setCustomValues({});
@@ -566,54 +483,112 @@ export default function App() {
     setCart(prev => prev.filter(item => item.id !== id));
   };
 
-  const submitTransaction = async () => {
+  const submitTransaction = () => {
     if (!studentName.trim() || cart.length === 0) return;
 
     const timestamp = new Date().toISOString();
     const displayDate = new Date(transactionDate).toLocaleDateString('en-IN');
 
-    const newRecord: Omit<SaleRecord, 'id'> = {
+    const newRecord: SaleRecord = {
+      id: crypto.randomUUID(),
       srNo: srNo,
       name: studentName,
       studentClass: studentClass,
-      items: [...cart],
-      totalAmount: cartTotal,
+      items: cart,
+      totalAmount: finalPayable,
+      discount: Number(discountAmount) || 0,
       date: displayDate,
       timestamp,
       paymentMode,
-      paidAmount: paymentMode !== 'Pending' ? Number(paidAmount) : undefined,
-      paymentDate: paymentMode !== 'Pending' ? paymentDate : undefined,
-      notes: generalNotes.trim() || undefined,
-      customData: undefined
     };
 
-    try {
-      await addDoc(collection(db, 'sales'), newRecord);
-      setSrNo(prev => prev + 1);
-      setCart([]);
-      setStudentName('');
-      setStudentClass(CLASSES[0]);
-      setGeneralNotes('');
-      setPaymentMode('Pending');
-      setPaidAmount('');
-    } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, 'sales');
+    if (paymentMode !== 'Pending') {
+      newRecord.paidAmount = Number(paidAmount);
+      newRecord.paymentDate = paymentDate;
     }
+    
+    if (generalNotes.trim()) {
+      newRecord.notes = generalNotes.trim();
+    }
+
+    setRecords(prev => [newRecord, ...prev]);
+    setSrNo(prev => prev + 1);
+    setCart([]);
+    setStudentName('');
+    setStudentClass(CLASSES[0]);
+    setGeneralNotes('');
+    setDiscountAmount('');
+    setPaymentMode('Pending');
+    setPaidAmount('');
+    setShowConfirmation(false);
   };
 
-  const deleteRecord = async (id: string) => {
-    if (!confirm("Are you sure you want to delete this record?")) return;
-    try {
-      await deleteDoc(doc(db, 'sales', id));
-    } catch (err) {
-      handleFirestoreError(err, OperationType.DELETE, `sales/${id}`);
-    }
+  const deleteRecord = (id: string) => {
+    setConfirmState({
+      isOpen: true,
+      title: 'Delete Record',
+      message: 'Are you sure you want to permanently delete this transaction record? This action cannot be undone.',
+      onConfirm: () => setRecords(prev => prev.filter(r => r.id !== id)),
+      type: 'danger'
+    });
+  };
+
+  const updateRecord = (id: string, updates: any) => {
+    setRecords(prev => prev.map(r => r.id === id ? { ...r, ...updates } : r));
+    setEditingRecord(null);
+  };
+
+  const bulkDeleteRecords = (ids: string[]) => {
+    setConfirmState({
+      isOpen: true,
+      title: 'Bulk Delete',
+      message: `Are you sure you want to delete ${ids.length} selected records? This action is permanent.`,
+      onConfirm: () => {
+        setRecords(prev => prev.filter(r => !ids.includes(r.id)));
+        setSelectedRecordIds([]);
+      },
+      type: 'danger'
+    });
+  };
+
+  const bulkUpdateStatus = (ids: string[], mode: PaymentMode) => {
+    const timestamp = new Date().toISOString();
+    const pDate = new Date().toISOString().split('T')[0];
+    
+    setRecords(prev => prev.map(r => {
+      if (ids.includes(r.id)) {
+        const updates: any = {
+          paymentMode: mode,
+          updatedAt: timestamp
+        };
+        
+        if (mode !== 'Pending') {
+          if (r.paymentMode === 'Pending') {
+            updates.paidAmount = r.totalAmount;
+            updates.paymentDate = pDate;
+          }
+        } else {
+          updates.paidAmount = null;
+          updates.paymentDate = null;
+        }
+        return { ...r, ...updates };
+      }
+      return r;
+    }));
+    setSelectedRecordIds([]);
   };
 
   const clearRecords = () => {
-    if (confirm("Permanently delete all sales history?")) {
-      setRecords([]);
-    }
+    setConfirmState({
+      isOpen: true,
+      title: 'Clear Ledger',
+      message: 'Are you sure you want to permanently delete all sales history? This action cannot be undone.',
+      onConfirm: () => {
+        setRecords([]);
+        setSelectedRecordIds([]);
+      },
+      type: 'danger'
+    });
   };
 
   const exportCSV = () => {
@@ -678,13 +653,27 @@ export default function App() {
   };
 
   const handlePrint = () => {
+    const originalTitle = document.title;
+    document.title = `Uniform_Sales_Report_${new Date().toLocaleDateString().replace(/\//g, '-')}`;
     window.print();
+    setTimeout(() => {
+      document.title = originalTitle;
+    }, 100);
   };
 
   return (
     <div className="min-h-screen flex flex-col font-sans">
+      <ConfirmDialog 
+        isOpen={confirmState.isOpen}
+        title={confirmState.title}
+        message={confirmState.message}
+        type={confirmState.type}
+        onConfirm={confirmState.onConfirm}
+        onCancel={() => setConfirmState(p => ({ ...p, isOpen: false }))}
+      />
+
       {/* Navigation */}
-      <nav className="bg-slate-900 text-white px-8 py-4 shadow-lg flex justify-between items-center sticky top-0 z-50">
+      <nav className="bg-slate-900 text-white px-8 py-4 shadow-lg flex justify-between items-center sticky top-0 z-50 print:hidden">
         <div className="flex items-center gap-3">
           <motion.div 
             initial={{ rotate: -10 }}
@@ -705,6 +694,8 @@ export default function App() {
             { id: 'sales', icon: PlusCircle, label: 'New Sale' },
             { id: 'ledger', icon: History, label: 'Ledger' },
             { id: 'reports', icon: BarChart3, label: 'Reports' },
+            { id: 'profile', icon: UserCircle, label: 'Profile' },
+            ...(user?.role === 'Admin' ? [{ id: 'admin', icon: Settings, label: 'Admin' }] : []),
           ].map(tab => (
             <button
               key={tab.id}
@@ -713,12 +704,6 @@ export default function App() {
               aria-controls={`${tab.id}-panel`}
               id={`${tab.id}-tab`}
               onClick={() => setActiveTab(tab.id as any)}
-              onKeyDown={(e) => {
-                const tabs = ['dashboard', 'pricing', 'sales', 'ledger', 'reports'];
-                const idx = tabs.indexOf(activeTab);
-                if (e.key === 'ArrowRight') setActiveTab(tabs[(idx + 1) % tabs.length] as any);
-                if (e.key === 'ArrowLeft') setActiveTab(tabs[(idx - 1 + tabs.length) % tabs.length] as any);
-              }}
               className={`relative flex items-center gap-2 px-5 py-2.5 rounded-xl text-[11px] font-black tracking-wider transition-all z-10 ${
                 activeTab === tab.id 
                   ? 'text-white' 
@@ -738,18 +723,16 @@ export default function App() {
           ))}
         </nav>
         <div className="flex items-center gap-4">
-          <div className="hidden lg:flex items-center gap-4 text-xs text-slate-400 px-4 py-1 bg-slate-800 rounded-full border border-slate-700">
-            <span className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
-            Session 2026-2027
+          <div className="hidden lg:block text-right">
+             <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest leading-none mb-1">Authenticated as</p>
+             <p className="text-xs font-bold text-white">{user?.name || user?.email}</p>
           </div>
-          {user && (
-            <button 
-              onClick={logout}
-              className="flex items-center gap-2 px-4 py-2 bg-slate-800 text-slate-400 rounded-xl hover:text-white hover:bg-slate-700 transition-all font-black text-[10px] uppercase tracking-widest border border-slate-700"
-            >
-              <LogOut size={14} /> Log Out
-            </button>
-          )}
+          <button 
+            onClick={logout}
+            className="flex items-center gap-2 px-4 py-2 bg-slate-800 text-slate-400 rounded-xl hover:text-white hover:bg-slate-700 transition-all font-black text-[10px] uppercase tracking-widest border border-slate-700"
+          >
+            <LogOut size={14} /> Log Out
+          </button>
         </div>
       </nav>
 
@@ -764,7 +747,7 @@ export default function App() {
               className="flex flex-col items-center justify-center min-h-[60vh] space-y-4"
             >
               <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin" />
-              <p className="font-black text-slate-400 uppercase tracking-widest text-[10px]">Initializing Cloud Sync...</p>
+              <p className="font-black text-slate-400 uppercase tracking-widest text-[10px]">Initializing System...</p>
             </motion.div>
           ) : !user ? (
             <motion.div 
@@ -778,14 +761,8 @@ export default function App() {
                 <FileSpreadsheet size={48} />
               </div>
               <div className="space-y-2">
-                <h2 className="text-3xl font-black text-slate-900 tracking-tight">
-                  {authMode === 'email-signup' ? 'Create Account' : 
-                   authMode === 'email-signin' ? 'Welcome Back' : 'Get Started'}
-                </h2>
-                <p className="text-slate-500 text-sm">
-                  {authMode === 'email-signup' ? 'Sign up with your organizational email.' : 
-                   'Sign in to access the Uniform Sales CRM.'}
-                </p>
+                <h2 className="text-3xl font-black text-slate-900 tracking-tight">Access Restricted</h2>
+                <p className="text-slate-500 text-sm">Sign in to access the Uniform Sales CRM.</p>
               </div>
 
               {loginError && (
@@ -795,129 +772,40 @@ export default function App() {
                 </div>
               )}
 
-              {verificationSent ? (
-                <div className="w-full p-6 bg-blue-50 border border-blue-100 rounded-2xl space-y-4">
-                  <div className="w-12 h-12 bg-blue-600 text-white rounded-full flex items-center justify-center mx-auto">
-                    <Mail size={24} />
+              <form onSubmit={handleEmailAuth} className="w-full space-y-4">
+                <div className="space-y-3">
+                  <div className="relative">
+                    <Mail className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={16} />
+                    <input 
+                      type="email" 
+                      required 
+                      placeholder="Administrator ID" 
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      className="w-full pl-12 pr-4 py-3.5 bg-white border border-slate-200 rounded-2xl outline-none focus:border-blue-500 transition-all font-medium text-sm shadow-sm"
+                    />
                   </div>
-                  <div className="space-y-1">
-                    <h3 className="font-bold text-blue-900">Verify your Email</h3>
-                    <p className="text-xs text-blue-700">We've sent a verification link to <strong>{email}</strong>. Please check your inbox.</p>
+                  <div className="relative">
+                    <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={16} />
+                    <input 
+                      type="password" 
+                      required 
+                      placeholder="Security PIN" 
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      className="w-full pl-12 pr-4 py-3.5 bg-white border border-slate-200 rounded-2xl outline-none focus:border-blue-500 transition-all font-medium text-sm shadow-sm"
+                    />
                   </div>
-                  <button 
-                    onClick={() => {
-                      setVerificationSent(false);
-                      setAuthMode('email-signin');
-                    }}
-                    className="text-xs font-black text-blue-600 uppercase tracking-widest hover:underline"
-                  >
-                    Back to Sign In
-                  </button>
                 </div>
-              ) : (
-                <>
-                  {authMode === 'google' ? (
-                    <div className="w-full space-y-4">
-                      <button 
-                        onClick={loginWithGoogle}
-                        disabled={loginLoading}
-                        className="w-full bg-slate-900 text-white flex items-center justify-center gap-3 py-4 rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-blue-600 hover:scale-[1.02] active:scale-[0.98] transition-all shadow-xl disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        {loginLoading ? <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> : <LogIn size={18} />}
-                        {loginLoading ? 'Signing In...' : 'Sign In with Google'}
-                      </button>
-                      <div className="relative">
-                        <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-slate-200"></div></div>
-                        <div className="relative flex justify-center text-[10px]"><span className="bg-slate-50 px-3 text-slate-400 font-bold uppercase tracking-widest leading-none">OR</span></div>
-                      </div>
-                      <button 
-                        onClick={() => setAuthMode('email-signin')}
-                        className="w-full bg-white border-2 border-slate-200 text-slate-800 flex items-center justify-center gap-3 py-4 rounded-2xl font-black uppercase tracking-widest text-xs hover:border-blue-600 hover:text-blue-600 transition-all"
-                      >
-                        <Mail size={18} /> Continue with Email
-                      </button>
-                    </div>
-                  ) : (
-                    <form onSubmit={handleEmailAuth} className="w-full space-y-4">
-                      <div className="space-y-3">
-                        <div className="relative">
-                          <Mail className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={16} />
-                          <input 
-                            type="email" 
-                            required 
-                            placeholder="Organizational Email" 
-                            value={email}
-                            onChange={(e) => setEmail(e.target.value)}
-                            className="w-full pl-12 pr-4 py-3.5 bg-white border border-slate-200 rounded-2xl outline-none focus:border-blue-500 transition-all font-medium text-sm shadow-sm"
-                          />
-                        </div>
-                        <div className="relative">
-                          <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={16} />
-                          <input 
-                            type="password" 
-                            required 
-                            placeholder="Password" 
-                            value={password}
-                            onChange={(e) => setPassword(e.target.value)}
-                            className="w-full pl-12 pr-4 py-3.5 bg-white border border-slate-200 rounded-2xl outline-none focus:border-blue-500 transition-all font-medium text-sm shadow-sm"
-                          />
-                        </div>
-                      </div>
-                      <button 
-                        type="submit"
-                        disabled={loginLoading}
-                        className="w-full bg-slate-900 text-white py-4 rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-blue-600 transition-all shadow-xl disabled:opacity-50"
-                      >
-                        {loginLoading ? 'Processing...' : (authMode === 'email-signup' ? 'Create Account' : 'Sign In')}
-                      </button>
-                      <div className="flex flex-col gap-2">
-                        <button 
-                          type="button"
-                          onClick={() => setAuthMode(authMode === 'email-signin' ? 'email-signup' : 'email-signin')}
-                          className="text-[10px] font-black text-slate-400 uppercase tracking-widest hover:text-blue-600 transition-colors"
-                        >
-                          {authMode === 'email-signin' ? "Don't have an account? Sign Up" : "Already have an account? Sign In"}
-                        </button>
-                        <button 
-                          type="button"
-                          onClick={() => setAuthMode('google')}
-                          className="text-[10px] font-black text-slate-400 uppercase tracking-widest hover:text-slate-600 transition-colors"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </form>
-                  )}
-                </>
-              )}
+                <button 
+                  type="submit"
+                  disabled={loginLoading}
+                  className="w-full bg-slate-900 text-white py-4 rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-blue-600 transition-all shadow-xl disabled:opacity-50"
+                >
+                  {loginLoading ? 'Authenticating...' : 'Sign In to CRM'}
+                </button>
+              </form>
               <div className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Authorized Personnel Only</div>
-            </motion.div>
-          ) : !user.emailVerified && authMode !== 'google' ? (
-            <motion.div 
-              key="verify"
-              className="flex flex-col items-center justify-center min-h-[60vh] space-y-8 max-w-sm mx-auto text-center"
-            >
-              <div className="w-24 h-24 bg-amber-100 text-amber-600 rounded-3xl flex items-center justify-center shadow-lg shadow-amber-500/10">
-                <Mail size={48} />
-              </div>
-              <div className="space-y-2">
-                <h2 className="text-3xl font-black text-slate-900 tracking-tight">Check your Email</h2>
-                <p className="text-slate-500 text-sm">Please verify your email address to access the CRM. We've sent a link to <strong>{user.email}</strong>.</p>
-              </div>
-              <div className="flex flex-col w-full gap-4">
-                <button 
-                  onClick={() => window.location.reload()}
-                  className="w-full bg-slate-900 text-white py-4 rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-blue-600 transition-all"
-                >
-                  I've Verified My Email
-                </button>
-                <button 
-                  onClick={logout}
-                  className="text-xs font-black text-slate-400 uppercase tracking-widest hover:text-slate-600"
-                >
-                  Sign in with a different account
-                </button>
-              </div>
             </motion.div>
           ) : (
             <>
@@ -1139,6 +1027,7 @@ export default function App() {
                 deleteSize={deleteSize}
                 newItem={newItem}
                 setNewItem={setNewItem}
+                can={can}
               />
               <div className="flex justify-center mt-8">
                 <button 
@@ -1183,11 +1072,14 @@ export default function App() {
                 customFields={customFields}
                 customValues={customValues}
                 setCustomValues={setCustomValues}
+                discountAmount={discountAmount}
+                setDiscountAmount={setDiscountAmount}
+                finalPayable={finalPayable}
                 addToCart={addToCart}
                 cart={cart}
                 cartTotal={cartTotal}
                 removeFromCart={removeFromCart}
-                submitTransaction={submitTransaction}
+                onSubmitClick={() => setShowConfirmation(true)}
                 paymentMode={paymentMode}
                 setPaymentMode={setPaymentMode}
                 paidAmount={paidAmount}
@@ -1197,6 +1089,8 @@ export default function App() {
                 addCustomField={addCustomField}
                 removeCustomField={removeCustomField}
                 updateCustomField={updateCustomField}
+                recentRecords={records.slice(0, 3)}
+                can={can}
               />
             </motion.div>
           )}
@@ -1225,9 +1119,17 @@ export default function App() {
                 exportCSV={exportCSV}
                 handlePrint={handlePrint}
                 deleteRecord={deleteRecord}
+                setEditingRecord={setEditingRecord}
+                updateRecord={updateRecord}
+                addRecord={(r: any) => setRecords((prev: any) => [r, ...prev])}
+                selectedRecordIds={selectedRecordIds}
+                setSelectedRecordIds={setSelectedRecordIds}
+                bulkDeleteRecords={bulkDeleteRecords}
+                bulkUpdateStatus={bulkUpdateStatus}
                 customFields={customFields}
                 grandTotal={filteredRecords.reduce((sum, r) => sum + r.totalAmount, 0)}
                 pricing={pricing}
+                can={can}
               />
             </motion.div>
           )}
@@ -1256,7 +1158,94 @@ export default function App() {
               />
             </motion.div>
           )}
+
+          {activeTab === 'profile' && (
+            <motion.div 
+              key="profile"
+              id="profile-panel"
+              role="tabpanel"
+              aria-labelledby="profile-tab"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+            >
+              <ProfileSection 
+                user={user}
+                setUser={(updated: User) => {
+                   setUser(updated);
+                   localStorage.setItem('uniform_user', JSON.stringify(updated));
+                   // Also update in users list
+                   setUsers(prev => prev.map(u => u.id === updated.id ? updated : u));
+                }}
+                logout={logout}
+              />
+            </motion.div>
+          )}
+
+          {activeTab === 'admin' && user?.role === 'Admin' && (
+            <motion.div 
+              key="admin"
+              id="admin-panel"
+              role="tabpanel"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+            >
+              <AdminDashboard 
+                users={users}
+                setUsers={setUsers}
+                currentUser={user}
+              />
+            </motion.div>
+          )}
           </>
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence>
+          {editingRecord && (
+            <EditRecordModal 
+              record={editingRecord}
+              onClose={() => setEditingRecord(null)}
+              onUpdate={updateRecord}
+              pricing={pricing}
+              customFields={customFields}
+            />
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence>
+          {showConfirmation && (
+            <div className="fixed inset-0 z-[150] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-md">
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.9, y: 20 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.9, y: 20 }}
+                className="bg-white p-8 rounded-3xl shadow-2xl max-w-sm w-full text-center space-y-6"
+              >
+                <div className="w-20 h-20 bg-blue-50 text-blue-600 rounded-full flex items-center justify-center mx-auto shadow-inner">
+                  <PlusCircle size={40} />
+                </div>
+                <div className="space-y-2">
+                  <h3 className="text-xl font-black text-slate-900">Final Confirmation</h3>
+                  <p className="text-sm text-slate-500">Are you sure you want to complete this transaction of <span className="font-bold text-slate-900">₹{finalPayable}</span> for <span className="font-bold text-slate-900">{studentName}</span>?</p>
+                </div>
+                <div className="flex gap-3">
+                  <button 
+                    onClick={() => setShowConfirmation(false)}
+                    className="flex-1 px-6 py-3 bg-slate-100 text-slate-600 rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-200 transition-all"
+                  >
+                    Review
+                  </button>
+                  <button 
+                    onClick={submitTransaction}
+                    className="flex-1 px-6 py-3 bg-blue-600 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-blue-700 transition-all shadow-xl shadow-blue-500/20"
+                  >
+                    Save & Post
+                  </button>
+                </div>
+              </motion.div>
+            </div>
           )}
         </AnimatePresence>
       </main>
@@ -1273,6 +1262,7 @@ export default function App() {
           { id: 'sales', icon: PlusCircle, label: 'Sale' },
           { id: 'ledger', icon: History, label: 'Ledger' },
           { id: 'reports', icon: BarChart3, label: 'Reports' },
+          { id: 'profile', icon: UserCircle, label: 'Profile' },
         ].map(tab => (
           <button
             key={tab.id}
@@ -1289,6 +1279,321 @@ export default function App() {
             <span className="text-[9px] font-black uppercase tracking-tighter">{tab.label}</span>
           </button>
         ))}
+      </div>
+    </div>
+  );
+}
+
+function ProfileSection({ user, setUser, logout }: any) {
+  const [name, setName] = useState(user?.name || '');
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [msg, setMsg] = useState<{ type: 'success' | 'error', text: string } | null>(null);
+
+  const handleUpdateName = (e: React.FormEvent) => {
+    e.preventDefault();
+    const updatedUser = { ...user, name };
+    setUser(updatedUser);
+    localStorage.setItem('uniform_user', JSON.stringify(updatedUser));
+    setMsg({ type: 'success', text: 'Profile name updated successfully.' });
+    setTimeout(() => setMsg(null), 3000);
+  };
+
+  const handleChangePassword = (e: React.FormEvent) => {
+    e.preventDefault();
+    // In a real app, we would verify current password. 
+    // Here we just simulate for the mock admin.
+    if (newPassword.length < 6) {
+      setMsg({ type: 'error', text: 'New password must be at least 6 characters.' });
+      return;
+    }
+    setMsg({ type: 'success', text: 'Password changed successfully.' });
+    setCurrentPassword('');
+    setNewPassword('');
+    setTimeout(() => setMsg(null), 3000);
+  };
+
+  return (
+    <div className="max-w-4xl mx-auto space-y-8">
+      <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">
+        <div className="flex flex-col md:flex-row gap-8 items-start">
+          <div className="w-32 h-32 bg-blue-600 rounded-3xl flex items-center justify-center shadow-2xl shadow-blue-500/20 text-white shrink-0">
+             <UserCircle size={64} />
+          </div>
+          <div className="space-y-4 flex-1">
+             <div className="space-y-1">
+                <h2 className="text-3xl font-black text-slate-900 tracking-tight">Account Settings</h2>
+                <p className="text-slate-500 font-medium">Manage your administrator profile and security.</p>
+             </div>
+             
+             {msg && (
+               <motion.div 
+                 initial={{ opacity: 0, y: -10 }} 
+                 animate={{ opacity: 1, y: 0 }}
+                 className={`p-4 rounded-2xl text-[10px] font-black uppercase tracking-widest ${msg.type === 'success' ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' : 'bg-red-50 text-red-600 border border-red-100'}`}
+               >
+                 {msg.text}
+               </motion.div>
+             )}
+
+             <div className="grid grid-cols-1 md:grid-cols-2 gap-8 pt-4">
+                <form onSubmit={handleUpdateName} className="space-y-4">
+                   <h3 className="text-xs font-black uppercase tracking-widest text-slate-400">Basic Information</h3>
+                   <div className="space-y-4">
+                      <div className="space-y-1">
+                         <label className="text-[9px] font-black uppercase text-slate-400 ml-1">Email Address (Read Only)</label>
+                         <div className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-slate-400 font-bold text-sm cursor-not-allowed">
+                            {user?.email}
+                         </div>
+                      </div>
+                      <div className="space-y-1">
+                         <label className="text-[9px] font-black uppercase text-slate-400 ml-1">Display Name</label>
+                         <input 
+                           type="text" 
+                           value={name}
+                           onChange={(e) => setName(e.target.value)}
+                           className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-slate-900 font-bold text-sm focus:border-blue-600 focus:ring-4 focus:ring-blue-600/5 outline-none transition-all"
+                         />
+                      </div>
+                      <button type="submit" className="px-6 py-3 bg-slate-900 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-800 transition-all shadow-lg">
+                        Update Information
+                      </button>
+                   </div>
+                </form>
+
+                <form onSubmit={handleChangePassword} className="space-y-4">
+                   <h3 className="text-xs font-black uppercase tracking-widest text-slate-400">Security & PIN</h3>
+                   <div className="space-y-4">
+                      <div className="space-y-1">
+                         <label className="text-[9px] font-black uppercase text-slate-400 ml-1">Current Password</label>
+                         <input 
+                           type="password" 
+                           placeholder="••••••••"
+                           value={currentPassword}
+                           onChange={(e) => setCurrentPassword(e.target.value)}
+                           className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-slate-900 font-bold text-sm focus:border-blue-600 focus:ring-4 focus:ring-blue-600/5 outline-none transition-all"
+                         />
+                      </div>
+                      <div className="space-y-1">
+                         <label className="text-[9px] font-black uppercase text-slate-400 ml-1">New Password</label>
+                         <input 
+                           type="password" 
+                           placeholder="••••••••"
+                           value={newPassword}
+                           onChange={(e) => setNewPassword(e.target.value)}
+                           className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-slate-900 font-bold text-sm focus:border-blue-600 focus:ring-4 focus:ring-blue-600/5 outline-none transition-all"
+                         />
+                      </div>
+                      <button type="submit" className="px-6 py-3 bg-blue-600 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-blue-700 transition-all shadow-lg shadow-blue-500/20">
+                        Change Password
+                      </button>
+                   </div>
+                </form>
+             </div>
+
+             <div className="pt-8 border-t border-slate-100 mt-8 flex justify-between items-center">
+                <div>
+                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Sign Out</p>
+                   <p className="text-xs text-slate-500">End your current session securely.</p>
+                </div>
+                <button 
+                  onClick={logout}
+                  className="px-6 py-3 border-2 border-red-500/20 text-red-600 rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-red-50 transition-all"
+                >
+                  Logout Session
+                </button>
+             </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+function AdminDashboard({ users, setUsers, currentUser }: any) {
+  const [newUserEmail, setNewUserEmail] = useState('');
+  const [newUserName, setNewUserName] = useState('');
+  const [newUserPassword, setNewUserPassword] = useState('');
+  const [newUserRole, setNewUserRole] = useState<UserRole>('Viewer');
+  const [msg, setMsg] = useState<{ type: 'success' | 'error', text: string } | null>(null);
+
+  const handleAddUser = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (users.some((u: User) => u.email === newUserEmail)) {
+      setMsg({ type: 'error', text: 'User with this email already exists.' });
+      return;
+    }
+    const newUser: User = {
+      id: crypto.randomUUID(),
+      email: newUserEmail,
+      name: newUserName,
+      password: newUserPassword,
+      role: newUserRole,
+      createdAt: new Date().toISOString()
+    };
+    setUsers([...users, newUser]);
+    setMsg({ type: 'success', text: `User ${newUserName} added successfully.` });
+    setNewUserEmail('');
+    setNewUserName('');
+    setNewUserPassword('');
+    setTimeout(() => setMsg(null), 3000);
+  };
+
+  const handleDeleteUser = (id: string) => {
+    if (id === currentUser.id) {
+      setMsg({ type: 'error', text: 'You cannot delete yourself.' });
+      return;
+    }
+    setUsers(users.filter((u: User) => u.id !== id));
+    setMsg({ type: 'success', text: 'User deleted successfully.' });
+    setTimeout(() => setMsg(null), 3000);
+  };
+
+  const handleUpdateRole = (id: string, role: UserRole) => {
+    if (id === currentUser.id) {
+      setMsg({ type: 'error', text: 'You cannot change your own role.' });
+      return;
+    }
+    setUsers(users.map((u: User) => u.id === id ? { ...u, role } : u));
+    setMsg({ type: 'success', text: 'User role updated successfully.' });
+    setTimeout(() => setMsg(null), 3000);
+  };
+
+  return (
+    <div className="max-w-6xl mx-auto space-y-8">
+      <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm space-y-8">
+        <div className="space-y-1">
+          <h2 className="text-3xl font-black text-slate-900 tracking-tight flex items-center gap-3">
+            <Settings className="text-blue-600" size={32} /> Admin Control Center
+          </h2>
+          <p className="text-slate-500 font-medium">Manage user identities, access levels, and security permissions.</p>
+        </div>
+
+        {msg && (
+          <motion.div 
+            initial={{ opacity: 0, y: -10 }} 
+            animate={{ opacity: 1, y: 0 }}
+            className={`p-4 rounded-2xl text-[10px] font-black uppercase tracking-widest ${msg.type === 'success' ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' : 'bg-red-50 text-red-600 border border-red-100'}`}
+          >
+            {msg.text}
+          </motion.div>
+        )}
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+          {/* Add User Form */}
+          <div className="lg:col-span-1 bg-slate-50 p-6 rounded-3xl border border-slate-100 space-y-6">
+            <h3 className="text-xs font-black uppercase tracking-widest text-slate-400">Add New User</h3>
+            <form onSubmit={handleAddUser} className="space-y-4">
+              <div className="space-y-1">
+                <label className="text-[9px] font-black uppercase text-slate-400 ml-1">Full Name</label>
+                <input 
+                  type="text" 
+                  required
+                  value={newUserName}
+                  onChange={(e) => setNewUserName(e.target.value)}
+                  className="w-full px-4 py-3 bg-white border border-slate-200 rounded-2xl text-slate-900 font-bold text-sm focus:border-blue-600 outline-none transition-all"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-[9px] font-black uppercase text-slate-400 ml-1">Email Address</label>
+                <input 
+                  type="email" 
+                  required
+                  value={newUserEmail}
+                  onChange={(e) => setNewUserEmail(e.target.value)}
+                  className="w-full px-4 py-3 bg-white border border-slate-200 rounded-2xl text-slate-900 font-bold text-sm focus:border-blue-600 outline-none transition-all"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-[9px] font-black uppercase text-slate-400 ml-1">Security PIN / Password</label>
+                <input 
+                  type="text" 
+                  required
+                  value={newUserPassword}
+                  onChange={(e) => setNewUserPassword(e.target.value)}
+                  className="w-full px-4 py-3 bg-white border border-slate-200 rounded-2xl text-slate-900 font-bold text-sm focus:border-blue-600 outline-none transition-all"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-[9px] font-black uppercase text-slate-400 ml-1">Access Level</label>
+                <select 
+                  value={newUserRole}
+                  onChange={(e) => setNewUserRole(e.target.value as UserRole)}
+                  className="w-full px-4 py-3 bg-white border border-slate-200 rounded-2xl text-slate-900 font-bold text-sm focus:border-blue-600 outline-none transition-all"
+                >
+                  <option value="Viewer">Viewer (Read Only)</option>
+                  <option value="Editor">Editor (Full CRM Access)</option>
+                  <option value="Admin">Admin (Full Control)</option>
+                </select>
+              </div>
+              <button 
+                type="submit"
+                className="w-full px-6 py-4 bg-slate-900 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-blue-600 transition-all shadow-xl"
+              >
+                Create User Profile
+              </button>
+            </form>
+          </div>
+
+          {/* User List Table */}
+          <div className="lg:col-span-2 space-y-6">
+            <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 font-mono">Managed Personnel ({users.length})</h3>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-separate border-spacing-y-2">
+                <thead>
+                  <tr className="text-[9px] font-black uppercase tracking-widest text-slate-400">
+                    <th className="px-4 py-2">User Information</th>
+                    <th className="px-4 py-2">Access Level</th>
+                    <th className="px-4 py-2 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-50">
+                  {users.map((u: User) => (
+                    <tr key={u.id} className="bg-white border border-slate-100 rounded-2xl overflow-hidden group">
+                      <td className="px-4 py-4 rounded-l-2xl">
+                        <div className="flex items-center gap-3">
+                          <div className={`w-10 h-10 rounded-xl flex items-center justify-center font-black ${
+                            u.role === 'Admin' ? 'bg-blue-100 text-blue-600' : 
+                            u.role === 'Editor' ? 'bg-indigo-100 text-indigo-600' : 'bg-slate-100 text-slate-600'
+                          }`}>
+                            {u.name.charAt(0)}
+                          </div>
+                          <div>
+                            <div className="text-sm font-black text-slate-800">{u.name} {u.id === currentUser.id && <span className="text-[8px] px-1.5 py-0.5 bg-blue-50 text-blue-600 rounded-full ml-1">YOU</span>}</div>
+                            <div className="text-[10px] font-bold text-slate-400 font-mono">{u.email}</div>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-4 py-4">
+                        <select 
+                          value={u.role}
+                          disabled={u.id === currentUser.id}
+                          onChange={(e) => handleUpdateRole(u.id, e.target.value as UserRole)}
+                          className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-1.5 text-[10px] font-black uppercase tracking-tight outline-none focus:border-blue-400 disabled:opacity-50"
+                        >
+                          <option value="Admin">Admin</option>
+                          <option value="Editor">Editor</option>
+                          <option value="Viewer">Viewer</option>
+                        </select>
+                      </td>
+                      <td className="px-4 py-4 rounded-r-2xl text-right">
+                        {u.id !== currentUser.id && (
+                          <button 
+                            onClick={() => handleDeleteUser(u.id)}
+                            className="p-2 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all"
+                          >
+                            <Trash2 size={18} />
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -1452,9 +1757,312 @@ function ReportsSection({
   );
 }
 
+function EditRecordModal({ record, onClose, onUpdate, pricing, customFields }: any) {
+  const [studentName, setStudentName] = useState(record.name);
+  const [studentClass, setStudentClass] = useState(record.studentClass);
+  const [transactionDate, setTransactionDate] = useState(() => {
+    // Try to parse display date back to ISO date for the input
+    const parts = record.date.split('/');
+    if (parts.length === 3) {
+      // Assuming DD/MM/YYYY from en-IN
+      return `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
+    }
+    return new Date().toISOString().split('T')[0];
+  });
+  const [generalNotes, setGeneralNotes] = useState(record.notes || '');
+  const [paymentMode, setPaymentMode] = useState(record.paymentMode);
+  const [paidAmount, setPaidAmount] = useState(record.paidAmount?.toString() || '');
+  const [paymentDate, setPaymentDate] = useState(record.paymentDate || new Date().toISOString().split('T')[0]);
+  const [cart, setCart] = useState<CartItem[]>(record.items);
+  const [customValues, setCustomValues] = useState(record.customValues || {});
+  const [discountAmount, setDiscountAmount] = useState<string>(record.discount?.toString() || '0');
+  
+  const [newItem, setNewItem] = useState({
+    item: Object.keys(pricing)[0] || '',
+    size: pricing[Object.keys(pricing)[0]] ? Object.keys(pricing[Object.keys(pricing)[0]])[0] : '',
+    qty: 1,
+    notes: ''
+  });
+
+  const cartTotal = useMemo(() => cart.reduce((sum, item) => sum + (item.qty * item.rate), 0), [cart]);
+  
+  const finalPayable = useMemo(() => {
+    const discount = Number(discountAmount) || 0;
+    return Math.max(0, cartTotal - discount);
+  }, [cartTotal, discountAmount]);
+
+  const currentRate = useMemo(() => {
+    return pricing[newItem.item]?.[newItem.size] || 0;
+  }, [pricing, newItem.item, newItem.size]);
+
+  const handleUpdate = () => {
+    if (!studentName.trim() || cart.length === 0) return;
+    
+    const displayDate = new Date(transactionDate).toLocaleDateString('en-IN');
+    const updates: any = {
+      name: studentName,
+      studentClass,
+      date: displayDate,
+      items: cart,
+      totalAmount: finalPayable,
+      discount: Number(discountAmount) || 0,
+      paymentMode,
+      notes: generalNotes.trim(),
+      customValues
+    };
+
+    if (paymentMode !== 'Pending') {
+      updates.paidAmount = Number(paidAmount);
+      updates.paymentDate = paymentDate;
+    } else {
+      updates.paidAmount = null; // Use null or delete to clear in Firestore
+      updates.paymentDate = null;
+    }
+
+    onUpdate(record.id, updates);
+  };
+
+  return (
+    <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+      <motion.div 
+        initial={{ opacity: 0, scale: 0.95, y: 20 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.95, y: 20 }}
+        className="bg-white w-full max-w-2xl rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
+      >
+        <div className="bg-slate-900 px-6 py-4 text-white flex justify-between items-center shrink-0">
+          <div className="flex items-center gap-3">
+            <div className="bg-blue-600 p-2 rounded-xl"><Pencil size={18} /></div>
+            <div>
+              <h3 className="font-black uppercase text-xs tracking-widest leading-none">Edit Record</h3>
+              <p className="text-[10px] text-slate-400 font-mono mt-1">SR NO #{record.srNo}</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-white/10 rounded-xl transition-all"><X size={20} /></button>
+        </div>
+
+        <div className="p-6 overflow-y-auto custom-scroll space-y-6">
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1">
+              <label className="text-[10px] font-black text-slate-400 uppercase ml-1">Date</label>
+              <input type="date" value={transactionDate} onChange={e => setTransactionDate(e.target.value)} className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl outline-none text-xs font-medium" />
+            </div>
+            <div className="space-y-1">
+              <label className="text-[10px] font-black text-slate-400 uppercase ml-1">Class</label>
+              <select value={studentClass} onChange={e => setStudentClass(e.target.value)} className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl outline-none text-xs font-medium">
+                {CLASSES.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <label className="text-[10px] font-black text-slate-400 uppercase ml-1">Student Name</label>
+            <input type="text" value={studentName} onChange={e => setStudentName(e.target.value)} className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl outline-none text-sm font-medium" />
+          </div>
+
+          {customFields.length > 0 && (
+            <div className="grid grid-cols-2 gap-4">
+              {customFields.map((field: any) => (
+                <div key={field.id} className="space-y-1">
+                  <label className="text-[10px] font-black text-slate-400 uppercase ml-1">{field.label}</label>
+                  <input 
+                    type={field.type} 
+                    value={customValues[field.id] || ''} 
+                    onChange={e => setCustomValues((p: any) => ({ ...p, [field.id]: e.target.value }))}
+                    className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl outline-none text-xs font-medium"
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 space-y-4">
+            <div className="grid grid-cols-2 gap-3">
+              <select value={newItem.item} onChange={e => setNewItem(p => ({ ...p, item: e.target.value, size: Object.keys(pricing[e.target.value] || {})[0] || '' }))} className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl outline-none text-xs">
+                {Object.keys(pricing).map(i => <option key={i} value={i}>{i}</option>)}
+              </select>
+              <select value={newItem.size} onChange={e => setNewItem(p => ({ ...p, size: e.target.value }))} className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl outline-none text-xs">
+                {Object.keys(pricing[newItem.item] || {}).map(s => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+            <div className="flex gap-2">
+              <input type="number" value={newItem.qty} onChange={e => setNewItem(p => ({ ...p, qty: Number(e.target.value) }))} className="w-20 px-3 py-2 bg-white border border-slate-200 rounded-xl outline-none text-xs" />
+              <div className="flex-1 bg-slate-100 border border-slate-200 rounded-xl px-3 flex items-center text-xs font-bold text-slate-600">₹ {currentRate}</div>
+              <button 
+                onClick={() => {
+                  const item: CartItem = { id: crypto.randomUUID(), item: newItem.item, size: newItem.size, qty: newItem.qty, rate: currentRate };
+                  if (newItem.notes.trim()) item.notes = newItem.notes.trim();
+                  setCart(p => [...p, item]);
+                  setNewItem(p => ({ ...p, qty: 1, notes: '' }));
+                }}
+                className="bg-blue-600 text-white px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-blue-700 transition-all shadow-md shadow-blue-500/20"
+              >
+                Add
+              </button>
+            </div>
+          </div>
+
+          {cart.length > 0 && (
+            <div className="space-y-2 max-h-40 overflow-y-auto custom-scroll pr-2">
+              {cart.map(item => (
+                <div key={item.id} className="flex justify-between items-center bg-white p-3 rounded-xl border border-slate-100 shadow-sm">
+                  <div className="text-[11px] font-bold text-slate-700 capitalize">{item.item} - {item.size} <span className="text-slate-400 font-mono">x {item.qty}</span></div>
+                  <div className="flex items-center gap-3">
+                    <span className="text-[11px] font-mono font-black text-slate-900">₹ {item.qty * item.rate}</span>
+                    <button onClick={() => setCart(p => p.filter(i => i.id !== item.id))} className="text-red-400 hover:text-red-600 transition-colors"><X size={14} /></button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="space-y-1">
+            <label className="text-[10px] font-black text-slate-400 uppercase ml-1">Notes</label>
+            <textarea value={generalNotes} onChange={e => setGeneralNotes(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none text-sm font-medium min-h-[60px]" placeholder="Add remarks..." />
+          </div>
+
+          <div className="p-4 bg-slate-900 rounded-2xl text-white space-y-4">
+            <div className="flex justify-between items-center pb-2 border-b border-slate-800">
+              <span className="text-[10px] uppercase font-black tracking-widest text-slate-500">Cart Subtotal</span>
+              <span className="text-sm font-black font-mono text-slate-300">₹ {cartTotal}</span>
+            </div>
+            <div className="flex justify-between items-center">
+              <span className="text-[10px] uppercase font-black tracking-widest text-slate-500">Discount Applied</span>
+              <div className="flex items-center gap-2">
+                <span className="text-slate-500 text-xs">-</span>
+                <input 
+                  type="number" 
+                  value={discountAmount} 
+                  onChange={e => setDiscountAmount(e.target.value)} 
+                  placeholder="₹"
+                  className="w-16 bg-slate-800 border-b border-slate-700 text-right px-1 py-0.5 text-xs text-blue-400 font-bold outline-none"
+                />
+              </div>
+            </div>
+            <div className="flex justify-between items-center pt-2 border-t border-slate-800">
+              <span className="text-[10px] uppercase font-black tracking-widest text-slate-500">Final Payable</span>
+              <span className="text-lg font-black font-mono text-blue-400">₹ {finalPayable}</span>
+            </div>
+            <div className="grid grid-cols-2 gap-3 pt-2">
+              <select value={paymentMode} onChange={e => setPaymentMode(e.target.value)} className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white outline-none">
+                <option value="Pending">Pending</option>
+                <option value="UPI">UPI</option>
+                <option value="Cash">Cash</option>
+              </select>
+              {paymentMode !== 'Pending' && (
+                <input type="number" value={paidAmount} onChange={e => setPaidAmount(e.target.value)} className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white outline-none" placeholder="Paid ₹" />
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="p-6 bg-slate-50 border-t border-slate-200 shrink-0 flex gap-3">
+          <button onClick={onClose} className="flex-1 px-6 py-3 bg-white border border-slate-200 text-slate-600 rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-100 transition-all">Cancel</button>
+          <button onClick={handleUpdate} className="flex-1 px-6 py-3 bg-blue-600 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-blue-700 transition-all shadow-xl shadow-blue-500/20">Save Changes</button>
+        </div>
+      </motion.div>
+    </div>
+  );
+}
+
 // --- Sub-components (extracted for tabs) ---
 
-function PriceConfigSection({ pricing, handlePriceChange, renameItem, renameSize, addNewItem, deleteItem, addNewSize, deleteSize, newItem, setNewItem }: any) {
+function SearchableSelect({ 
+  options, 
+  value, 
+  onChange, 
+  placeholder = "Select an option...", 
+  disabled = false,
+  label = ""
+}: { 
+  options: string[], 
+  value: string, 
+  onChange: (val: string) => void, 
+  placeholder?: string,
+  disabled?: boolean,
+  label?: string
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [search, setSearch] = useState('');
+
+  const filteredOptions = options.filter(opt => 
+    opt.toLowerCase().includes(search.toLowerCase())
+  );
+
+  return (
+    <div className="relative space-y-1">
+      {label && <label className="text-[9px] font-black uppercase text-slate-400 ml-2 tracking-widest">{label}</label>}
+      <div 
+        onClick={() => !disabled && setIsOpen(!isOpen)}
+        className={`w-full px-4 py-3 bg-white border ${isOpen ? 'border-blue-500 ring-4 ring-blue-50' : 'border-slate-200'} rounded-2xl flex items-center justify-between cursor-pointer transition-all ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+      >
+        <span className={`text-sm font-bold ${value ? 'text-slate-900' : 'text-slate-400'}`}>
+          {value || placeholder}
+        </span>
+        <ChevronDown size={16} className={`text-slate-400 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+      </div>
+
+      <AnimatePresence>
+        {isOpen && !disabled && (
+          <>
+            <div 
+              className="fixed inset-0 z-40" 
+              onClick={() => setIsOpen(false)} 
+            />
+            <motion.div 
+              initial={{ opacity: 0, y: 10, scale: 0.95 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 10, scale: 0.95 }}
+              className="absolute left-0 right-0 top-full mt-2 bg-white rounded-2xl shadow-2xl border border-slate-100 z-50 overflow-hidden"
+            >
+              <div className="p-2 border-b border-slate-50">
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                  <input 
+                    autoFocus
+                    type="text"
+                    placeholder="Search options..."
+                    className="w-full pl-9 pr-4 py-2 text-xs bg-slate-50 rounded-xl outline-none focus:bg-white focus:ring-2 focus:ring-blue-100 transition-all font-medium"
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    onClick={(e) => e.stopPropagation()}
+                  />
+                </div>
+              </div>
+              <div className="max-h-48 overflow-y-auto custom-scroll p-1">
+                {filteredOptions.length > 0 ? (
+                  filteredOptions.map((opt) => (
+                    <div 
+                      key={opt}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onChange(opt);
+                        setIsOpen(false);
+                        setSearch('');
+                      }}
+                      className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center justify-between cursor-pointer transition-colors ${
+                        value === opt ? 'bg-blue-50 text-blue-600' : 'text-slate-600 hover:bg-slate-50'
+                      }`}
+                    >
+                      {opt}
+                      {value === opt && <Check size={14} />}
+                    </div>
+                  ))
+                ) : (
+                  <div className="py-8 text-center text-[10px] font-black uppercase text-slate-400 tracking-widest italic">
+                    No results found
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+function PriceConfigSection({ pricing, handlePriceChange, renameItem, renameSize, addNewItem, deleteItem, addNewSize, deleteSize, newItem, setNewItem, can }: any) {
   return (
     <section className="bg-white rounded-2xl shadow-md border border-slate-200 overflow-hidden">
       <div className="bg-slate-50 px-5 py-4 border-b border-slate-200 flex justify-between items-center">
@@ -1482,22 +2090,28 @@ function PriceConfigSection({ pricing, handlePriceChange, renameItem, renameSize
                     <div className="p-2 bg-blue-50 rounded-lg text-blue-500">
                       <Package size={16} />
                     </div>
-                    <input 
-                      type="text"
-                      defaultValue={item}
-                      aria-label={`Rename item ${item}`}
-                      onBlur={(e) => renameItem(item, e.target.value)}
-                      onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
-                      className="text-[11px] font-black text-slate-800 uppercase tracking-widest bg-transparent border-b border-transparent hover:border-blue-200 focus:border-blue-500 outline-none w-full transition-all cursor-edit"
-                    />
+                    {can('edit') ? (
+                      <input 
+                        type="text"
+                        defaultValue={item}
+                        aria-label={`Rename item ${item}`}
+                        onBlur={(e) => renameItem(item, e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
+                        className="text-[11px] font-black text-slate-800 uppercase tracking-widest bg-transparent border-b border-transparent hover:border-blue-200 focus:border-blue-500 outline-none w-full transition-all cursor-edit"
+                      />
+                    ) : (
+                      <span className="text-[11px] font-black text-slate-800 uppercase tracking-widest">{item}</span>
+                    )}
                   </div>
-                  <button 
-                    onClick={() => deleteItem(item)}
-                    aria-label={`Delete ${item}`}
-                    className="text-slate-300 hover:text-red-500 p-2 rounded-xl hover:bg-red-50 transition-all ml-2"
-                  >
-                    <Trash2 size={16} />
-                  </button>
+                  {can('delete') && (
+                    <button 
+                      onClick={() => deleteItem(item)}
+                      aria-label={`Delete ${item}`}
+                      className="text-slate-300 hover:text-red-500 p-2 rounded-xl hover:bg-red-50 transition-all ml-2"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  )}
                 </div>
 
                 {/* Sub-headings Row */}
@@ -1511,28 +2125,38 @@ function PriceConfigSection({ pricing, handlePriceChange, renameItem, renameSize
                 <div className="flex-1 overflow-y-auto max-h-[400px] custom-scroll">
                   {Object.entries(sizes).map(([size, price]: [string, any]) => (
                     <div key={size} className="grid grid-cols-3 items-center px-5 py-3 border-b border-slate-100 hover:bg-white transition-colors group/row">
-                      <input 
-                        type="text"
-                        defaultValue={size}
-                        onBlur={(e) => renameSize(item, size, e.target.value)}
-                        onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
-                        className="text-[10px] font-bold text-slate-600 uppercase bg-transparent outline-none border-b border-transparent hover:border-blue-200 transition-all w-full pr-2"
-                      />
+                      {can('edit') ? (
+                        <input 
+                          type="text"
+                          defaultValue={size}
+                          onBlur={(e) => renameSize(item, size, e.target.value)}
+                          onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
+                          className="text-[10px] font-bold text-slate-600 uppercase bg-transparent outline-none border-b border-transparent hover:border-blue-200 transition-all w-full pr-2"
+                        />
+                      ) : (
+                        <span className="text-[10px] font-bold text-slate-600 uppercase truncate pr-2">{size}</span>
+                      )}
                       <div className="text-[10px] text-slate-400 font-mono font-medium text-center">1 Unit</div>
                       <div className="flex items-center justify-end gap-1 relative">
                         <span className="text-[10px] text-slate-400 font-bold">₹</span>
-                        <input 
-                          type="number" 
-                          value={price}
-                          onChange={(e) => handlePriceChange(item, size, Number(e.target.value))}
-                          className="w-16 text-right text-[11px] font-black text-slate-900 bg-transparent outline-none"
-                        />
-                        <button 
-                          onClick={() => deleteSize(item, size)}
-                          className="absolute -right-4 text-slate-200 hover:text-red-500 opacity-0 group-row:hover:opacity-100 transition-all p-1"
-                        >
-                          <X size={10} />
-                        </button>
+                        {can('edit') ? (
+                          <input 
+                            type="number" 
+                            value={price}
+                            onChange={(e) => handlePriceChange(item, size, Number(e.target.value))}
+                            className="w-16 text-right text-[11px] font-black text-slate-900 bg-transparent outline-none"
+                          />
+                        ) : (
+                          <span className="text-[11px] font-black text-slate-900">{price}</span>
+                        )}
+                        {can('delete') && (
+                          <button 
+                            onClick={() => deleteSize(item, size)}
+                            className="absolute -right-4 text-slate-200 hover:text-red-500 opacity-0 group-hover/row:opacity-100 transition-all p-1"
+                          >
+                            <X size={10} />
+                          </button>
+                        )}
                       </div>
                     </div>
                   ))}
@@ -1546,45 +2170,49 @@ function PriceConfigSection({ pricing, handlePriceChange, renameItem, renameSize
                 </div>
 
                 {/* Footer: Add New Size Form */}
-                <form 
-                  onSubmit={(e) => addNewSize(item, e)}
-                  className="p-4 bg-white border-t border-slate-200 mt-auto"
-                >
-                  <div className="flex gap-2">
-                    <input name="size" placeholder="SIZE" className="w-16 px-3 py-2 text-[10px] uppercase font-black bg-slate-50 border border-slate-100 rounded-xl outline-none focus:border-blue-500 focus:bg-white transition-all text-center" required />
-                    <input name="price" type="number" placeholder="PRICE ₹" className="flex-1 px-3 py-2 text-[10px] font-bold bg-slate-50 border border-slate-100 rounded-xl outline-none focus:border-blue-500 focus:bg-white transition-all" required />
-                    <button type="submit" className="bg-blue-600 text-white p-2 rounded-xl hover:bg-blue-700 transition-all active:scale-95 shadow-md shadow-blue-500/20">
-                      <Plus size={14} strokeWidth={3} />
-                    </button>
-                  </div>
-                </form>
+                {can('add') && (
+                  <form 
+                    onSubmit={(e) => addNewSize(item, e)}
+                    className="p-4 bg-white border-t border-slate-200 mt-auto"
+                  >
+                    <div className="flex gap-2">
+                      <input name="size" placeholder="SIZE" className="w-16 px-3 py-2 text-[10px] uppercase font-black bg-slate-50 border border-slate-100 rounded-xl outline-none focus:border-blue-500 focus:bg-white transition-all text-center" required />
+                      <input name="price" type="number" placeholder="PRICE ₹" className="flex-1 px-3 py-2 text-[10px] font-bold bg-slate-50 border border-slate-100 rounded-xl outline-none focus:border-blue-500 focus:bg-white transition-all" required />
+                      <button type="submit" className="bg-blue-600 text-white p-2 rounded-xl hover:bg-blue-700 transition-all active:scale-95 shadow-md shadow-blue-500/20">
+                        <Plus size={14} strokeWidth={3} />
+                      </button>
+                    </div>
+                  </form>
+                )}
               </motion.div>
             ))}
           </AnimatePresence>
 
           {/* Add New Item Column Form */}
-          <div className="w-80 bg-slate-50 border-2 border-dashed border-slate-300 rounded-2xl flex flex-col shrink-0 overflow-hidden hover:border-blue-300 hover:bg-blue-50/20 transition-all group/newitem">
-             <div className="flex-1 flex flex-col items-center justify-center p-8 text-center space-y-4">
-                <div className="w-12 h-12 bg-white rounded-2xl flex items-center justify-center text-slate-300 shadow-sm border border-slate-100 group-hover/newitem:text-blue-500 group-hover/newitem:scale-110 transition-all">
-                  <PlusCircle size={24} strokeWidth={1.5} />
-                </div>
-                <div>
-                   <h3 className="text-xs font-black text-slate-800 uppercase tracking-widest mb-1">New Category</h3>
-                   <p className="text-[10px] text-slate-400 font-medium">Add a new item to price list</p>
-                </div>
-                <form onSubmit={addNewItem} className="w-full space-y-3">
-                  <input 
-                    name="itemName"
-                    placeholder="Item Name (e.g. Tie)"
-                    className="w-full px-4 py-3 text-xs text-center border border-slate-200 rounded-xl bg-white focus:border-blue-500 outline-none transition-all font-semibold shadow-sm"
-                    required
-                  />
-                  <button type="submit" className="w-full bg-slate-900 text-white font-black text-[10px] py-3 rounded-xl tracking-[0.2em] hover:bg-blue-600 transition-all shadow-lg active:scale-95">
-                    CREATE COLUMN
-                  </button>
-                </form>
-             </div>
-          </div>
+          {can('add') && (
+            <div className="w-80 bg-slate-50 border-2 border-dashed border-slate-300 rounded-2xl flex flex-col shrink-0 overflow-hidden hover:border-blue-300 hover:bg-blue-50/20 transition-all group/newitem">
+               <div className="flex-1 flex flex-col items-center justify-center p-8 text-center space-y-4">
+                  <div className="w-12 h-12 bg-white rounded-2xl flex items-center justify-center text-slate-300 shadow-sm border border-slate-100 group-hover/newitem:text-blue-500 group-hover/newitem:scale-110 transition-all">
+                    <PlusCircle size={24} strokeWidth={1.5} />
+                  </div>
+                  <div>
+                     <h3 className="text-xs font-black text-slate-800 uppercase tracking-widest mb-1">New Category</h3>
+                     <p className="text-[10px] text-slate-400 font-medium">Add a new item to price list</p>
+                  </div>
+                  <form onSubmit={addNewItem} className="w-full space-y-3">
+                    <input 
+                      name="itemName"
+                      placeholder="Item Name (e.g. Tie)"
+                      className="w-full px-4 py-3 text-xs text-center border border-slate-200 rounded-xl bg-white focus:border-blue-500 outline-none transition-all font-semibold shadow-sm"
+                      required
+                    />
+                    <button type="submit" className="w-full bg-slate-900 text-white font-black text-[10px] py-3 rounded-xl tracking-[0.2em] hover:bg-blue-600 transition-all shadow-lg active:scale-95">
+                      CREATE COLUMN
+                    </button>
+                  </form>
+               </div>
+            </div>
+          )}
         </div>
       </div>
     </section>
@@ -1594,173 +2222,403 @@ function PriceConfigSection({ pricing, handlePriceChange, renameItem, renameSize
 function SalesFormSection({ 
   showConfig, setShowConfig, formError, srNo, setSrNo, transactionDate, setTransactionDate, 
   studentName, setStudentName, studentClass, setStudentClass, generalNotes, setGeneralNotes, newItem, setNewItem, pricing, currentRate, customFields, customValues, 
-  setCustomValues, addToCart, cart, cartTotal, removeFromCart, submitTransaction, 
+  setCustomValues, discountAmount, setDiscountAmount, finalPayable, addToCart, cart, cartTotal, removeFromCart, onSubmitClick, 
   paymentMode, setPaymentMode, paidAmount, setPaidAmount, paymentDate, setPaymentDate,
-  addCustomField, removeCustomField, updateCustomField
+  addCustomField, removeCustomField, updateCustomField, recentRecords, can
 }: any) {
   return (
-    <section className="bg-white rounded-2xl shadow-md border border-slate-200 overflow-hidden">
-      <div className="bg-blue-600 px-5 py-4 text-white flex justify-between items-center">
-        <h2 className="font-bold uppercase text-xs tracking-widest">New Sales Record</h2>
-        <button 
-          onClick={() => setShowConfig(!showConfig)}
-          aria-label="Toggle custom field configuration"
-          aria-expanded={showConfig}
-          className={`p-1.5 rounded-lg transition-all ${showConfig ? 'bg-white text-blue-600' : 'bg-blue-500 hover:bg-blue-400'}`}
-        >
-          <Sliders size={16} aria-hidden="true" />
-        </button>
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <section className="lg:col-span-2 bg-white rounded-3xl shadow-md border border-slate-200 overflow-hidden">
+          <div className="bg-blue-600 px-6 py-5 text-white flex justify-between items-center">
+            <div>
+              <h2 className="font-black uppercase text-[10px] tracking-widest opacity-80">Point of Sale</h2>
+              <h3 className="font-black text-lg tracking-tight">New Transaction</h3>
+            </div>
+            {can('manage-users') && ( // Use manage-users as a proxy for 'Admin' level config
+              <button 
+                onClick={() => setShowConfig(!showConfig)}
+                className={`p-2 rounded-xl transition-all ${showConfig ? 'bg-white text-blue-600 shadow-lg' : 'bg-blue-500 hover:bg-blue-400'}`}
+              >
+                <Sliders size={20} />
+              </button>
+            )}
+          </div>
+          
+          <AnimatePresence>
+            {showConfig && can('manage-users') && (
+              <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="bg-slate-900 text-white overflow-hidden">
+                <div className="p-6 space-y-4">
+                  <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Custom Form Fields</h3>
+                  <div className="space-y-2 max-h-56 overflow-y-auto custom-scroll pr-2">
+                    {customFields.map((field: any) => (
+                      <div key={field.id} className="flex gap-2 bg-slate-800 p-2.5 rounded-xl border border-slate-700">
+                        <input type="text" value={field.label} onChange={(e) => updateCustomField(field.id, { label: e.target.value })} className="bg-transparent text-xs font-bold w-full outline-none focus:text-blue-400" />
+                        <select value={field.type} onChange={(e) => updateCustomField(field.id, { type: e.target.value as any })} className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-[9px] font-black uppercase outline-none text-slate-400">
+                          <option value="text">TEXT</option>
+                          <option value="number">NUM</option>
+                          <option value="date">DATE</option>
+                        </select>
+                        <button onClick={() => removeCustomField(field.id)} className="text-slate-600 hover:text-red-400 transition-colors px-1"><X size={16} /></button>
+                      </div>
+                    ))}
+                  </div>
+                  <form onSubmit={addCustomField} className="space-y-3 pt-4 border-t border-slate-800">
+                    <div className="grid grid-cols-2 gap-3">
+                      <input name="label" placeholder="Grade/Section" className="bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5 text-xs outline-none focus:border-blue-500" required />
+                      <select name="type" className="bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5 text-xs outline-none">
+                        <option value="text">Text</option>
+                        <option value="number">Number</option>
+                        <option value="date">Date</option>
+                      </select>
+                    </div>
+                    <button type="submit" className="bg-blue-600 text-white py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-blue-500 w-full flex items-center justify-center gap-2 shadow-lg shadow-blue-500/10">
+                      <Plus size={14} /> ADD FIELD
+                    </button>
+                  </form>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          <div className="p-8 space-y-8">
+            {formError && <div className="bg-red-50 text-red-600 p-4 rounded-2xl border border-red-100 text-xs font-bold text-center animate-shake uppercase tracking-wider">{formError}</div>}
+            
+            <div className="grid grid-cols-2 gap-6">
+              <div className="space-y-2">
+                <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 text-xs">SR Number</label>
+                <div className="relative">
+                  <Hash className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300 pointer-events-none" size={16} />
+                  <input 
+                    disabled={!can('add')}
+                    value={srNo} 
+                    onChange={(e) => setSrNo(Number(e.target.value))} 
+                    type="number" 
+                    className="w-full pl-12 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl outline-none text-sm font-bold focus:ring-4 focus:ring-blue-100 focus:border-blue-500 transition-all disabled:opacity-50" 
+                  />
+                </div>
+              </div>
+              <div className="space-y-2">
+                <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 text-xs">Bill Date</label>
+                <div className="relative">
+                  <Calendar className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300 pointer-events-none" size={16} />
+                  <input 
+                    disabled={!can('add')}
+                    value={transactionDate} 
+                    onChange={(e) => setTransactionDate(e.target.value)} 
+                    type="date" 
+                    className="w-full pl-12 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl outline-none text-sm font-bold focus:ring-4 focus:ring-blue-100 focus:border-blue-500 transition-all disabled:opacity-50" 
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div className="space-y-2">
+                <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 text-xs">Student Full Name</label>
+                <div className="relative">
+                  <UserIcon className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
+                  <input 
+                    disabled={!can('add')}
+                    value={studentName} 
+                    onChange={(e) => setStudentName(e.target.value)} 
+                    type="text" 
+                    className="w-full pl-12 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl outline-none font-bold text-sm focus:ring-4 focus:ring-blue-100 focus:border-blue-500 transition-all disabled:opacity-50" 
+                    placeholder="Enter name..." 
+                  />
+                </div>
+              </div>
+              <div className="space-y-2">
+                <SearchableSelect 
+                  label="Assigned Class"
+                  options={CLASSES}
+                  value={studentClass}
+                  disabled={!can('add')}
+                  onChange={(val) => setStudentClass(val)}
+                  placeholder="Select class..."
+                />
+              </div>
+            </div>
+
+            <div className="p-6 bg-slate-50/50 rounded-3xl border border-slate-100 space-y-6">
+              <div className="flex items-center gap-3 mb-2">
+                 <div className="h-1 w-8 bg-blue-600 rounded-full" />
+                 <span className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Inventory Selection</span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <SearchableSelect 
+                  label="Category / Item"
+                  options={Object.keys(pricing)}
+                  value={newItem.item}
+                  disabled={!can('add')}
+                  onChange={(val) => setNewItem((p: any) => ({ ...p, item: val, size: Object.keys(pricing[val] || {})[0] }))}
+                  placeholder="Select item..."
+                />
+                <SearchableSelect 
+                  label="Size / Variant"
+                  options={Object.keys(pricing[newItem.item] || {})}
+                  value={newItem.size}
+                  disabled={!can('add')}
+                  onChange={(val) => setNewItem((p: any) => ({ ...p, size: val }))}
+                  placeholder="Select size..."
+                />
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="relative">
+                  <div className="absolute inset-y-0 left-4 flex items-center text-[10px] font-black text-slate-400 uppercase">Qty</div>
+                  <input 
+                    disabled={!can('add')}
+                    value={newItem.qty} 
+                    onChange={(e) => setNewItem((p: any) => ({ ...p, qty: Number(e.target.value) }))} 
+                    type="number" 
+                    min="1" 
+                    className="w-full pl-12 pr-4 py-3 bg-white border border-slate-200 rounded-2xl outline-none text-sm font-mono font-black disabled:opacity-50" 
+                  />
+                </div>
+                <div className="px-5 py-3 bg-slate-100 border border-slate-200 rounded-2xl text-slate-600 font-mono font-black text-sm flex items-center transition-colors">
+                  <span className="text-[10px] mr-auto uppercase tracking-widest text-slate-400">Unit Price</span>
+                  ₹ {currentRate}
+                </div>
+              </div>
+              
+              {customFields.length > 0 && (
+                <div className="grid grid-cols-2 gap-4">
+                  {customFields.map((field: any) => (
+                    <div key={field.id} className="space-y-1">
+                      <label className="text-[9px] font-black uppercase text-slate-400 ml-2 tracking-widest">{field.label}</label>
+                      <input 
+                        disabled={!can('add')}
+                        type={field.type} 
+                        value={customValues[field.id] || ''} 
+                        onChange={(e) => setCustomValues((p: any) => ({ ...p, [field.id]: e.target.value }))} 
+                        className="w-full px-4 py-2.5 bg-white border border-slate-200 rounded-2xl outline-none text-xs font-bold disabled:opacity-50" 
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {can('add') && (
+                <button onClick={addToCart} className="w-full bg-slate-900 text-white font-black py-4 rounded-2xl hover:bg-blue-600 transition-all flex items-center justify-center gap-3 shadow-xl hover:translate-y-[-2px] active:translate-y-0 uppercase tracking-widest text-[10px]">
+                  <PlusCircle size={18} /> Append to Shipment
+                </button>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 text-xs">Transaction Remarks</label>
+              <textarea 
+                disabled={!can('add')}
+                value={generalNotes} 
+                onChange={(e) => setGeneralNotes(e.target.value)}
+                className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-3xl outline-none text-sm font-medium resize-none min-h-[100px] focus:ring-4 focus:ring-blue-50 transition-all disabled:opacity-50"
+                placeholder="Optional notes for this sale (appears on ledger)..."
+              />
+            </div>
+          </div>
+        </section>
+
+        <div className="space-y-6">
+          <section className="bg-slate-900 rounded-3xl shadow-xl overflow-hidden text-white flex flex-col h-fit">
+            <div className="p-6 border-b border-slate-800">
+               <h3 className="text-xs font-black uppercase tracking-widest text-slate-500 mb-4">Cart Summary</h3>
+               {cart.length === 0 ? (
+                 <div className="py-12 flex flex-col items-center justify-center text-center space-y-3 opacity-30">
+                    <History size={40} />
+                    <p className="text-[10px] font-bold uppercase tracking-widest">Cart is empty</p>
+                 </div>
+               ) : (
+                <div className="space-y-3 max-h-[300px] overflow-y-auto custom-scroll pr-2 mb-6">
+                  <AnimatePresence mode="popLayout">
+                    {cart.map((item: any) => (
+                      <motion.div 
+                        key={item.id} 
+                        layout
+                        initial={{ opacity: 0, x: 20 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        exit={{ opacity: 0, x: -20 }}
+                        className="flex justify-between items-center bg-slate-800 p-3 rounded-2xl border border-slate-700/50 group"
+                      >
+                         <div className="flex-1">
+                           <div className="text-[11px] font-black uppercase tracking-tight text-slate-200">{item.item}</div>
+                           <div className="text-[9px] font-bold text-slate-500 uppercase">{item.size} &bull; Qty: {item.qty}</div>
+                         </div>
+                         <div className="flex items-center gap-3">
+                            <span className="text-xs font-black font-mono">₹{item.qty * item.rate}</span>
+                            {can('add') && (
+                              <button onClick={() => removeFromCart(item.id)} className="text-slate-600 hover:text-red-400 p-1.5 rounded-xl hover:bg-slate-700 transition-all"><X size={14} /></button>
+                            )}
+                         </div>
+                      </motion.div>
+                    ))}
+                  </AnimatePresence>
+                </div>
+               )}
+            </div>
+            
+            <div className="p-8 space-y-5 bg-gradient-to-b from-slate-900 to-black">
+               <div className="flex justify-between items-center text-slate-400">
+                  <span className="text-[10px] font-black uppercase tracking-widest">Subtotal</span>
+                  <span className="text-sm font-black font-mono">₹ {cartTotal}</span>
+               </div>
+               
+               <div className="flex justify-between items-center group">
+                  <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 group-hover:text-amber-500 transition-colors">Discount</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-slate-600">-</span>
+                    <input 
+                      disabled={!can('add')}
+                      type="number" 
+                      value={discountAmount} 
+                      onChange={(e) => setDiscountAmount(e.target.value)} 
+                      placeholder="₹0"
+                      className="w-16 bg-transparent border-b border-slate-700 focus:border-amber-500 text-right px-1 py-1 text-xs text-amber-500 font-black outline-none transition-all disabled:opacity-50"
+                    />
+                  </div>
+               </div>
+
+               <div className="pt-4 border-t border-slate-800 flex justify-between items-center">
+                  <span className="text-xs font-black uppercase tracking-[0.2em] text-blue-500">Net Payable</span>
+                  <span className="text-2xl font-black font-mono text-white tracking-tighter">₹ {finalPayable}</span>
+               </div>
+
+               <div className="space-y-3 pt-2">
+                  <label className="text-[9px] font-black uppercase tracking-widest text-slate-500">Settlement Method</label>
+                  <select 
+                    disabled={!can('add')}
+                    value={paymentMode} 
+                    onChange={(e) => setPaymentMode(e.target.value)} 
+                    className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-4 py-3 text-xs font-bold text-white outline-none focus:ring-2 focus:ring-blue-500/50 appearance-none transition-all disabled:opacity-50"
+                  >
+                    <option value="Pending">🕒 Pending / Credit</option>
+                    <option value="UPI">💳 UPI Payment</option>
+                    <option value="Cash">💵 Cash Payment</option>
+                  </select>
+                  
+                  {paymentMode !== 'Pending' && (
+                    <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-3">
+                       <input 
+                        disabled={!can('add')}
+                        type="number" 
+                        value={paidAmount} 
+                        onChange={(e) => setPaidAmount(e.target.value)} 
+                        placeholder="Amount Paid ₹" 
+                        className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-4 py-3 text-xs font-bold text-white outline-none disabled:opacity-50" 
+                      />
+                       <input 
+                        disabled={!can('add')}
+                        type="date" 
+                        value={paymentDate} 
+                        onChange={(e) => setPaymentDate(e.target.value)} 
+                        className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-4 py-3 text-xs font-bold text-white outline-none font-mono disabled:opacity-50" 
+                      />
+                    </motion.div>
+                  )}
+               </div>
+
+               {can('add') && (
+                 <button 
+                  onClick={onSubmitClick}
+                  disabled={cart.length === 0 || !studentName.trim()}
+                  className="w-full bg-blue-600 text-white font-black py-4 rounded-2xl mt-4 shadow-2xl shadow-blue-500/20 hover:bg-blue-500 hover:translate-y-[-2px] active:translate-y-0 transition-all uppercase tracking-[0.2em] text-[11px] disabled:opacity-30 disabled:grayscale disabled:cursor-not-allowed group"
+                 >
+                   POST TRANSACTION <ChevronRight className="inline-block ml-1 group-hover:translate-x-1 transition-transform" size={14} />
+                 </button>
+               )}
+            </div>
+          </section>
+
+          {/* Recent Records Sidebar */}
+          <section className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
+             <div className="px-5 py-4 bg-slate-50 border-b border-slate-100 flex items-center justify-between">
+                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 flex items-center gap-2"><History size={12} /> Recent History</span>
+                <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
+             </div>
+             <div className="p-4 space-y-3">
+                {recentRecords.length === 0 ? (
+                  <p className="text-[10px] text-center py-6 text-slate-400 font-bold uppercase tracking-widest opacity-50">No activity yet</p>
+                ) : (
+                  recentRecords.map((r: any) => (
+                    <div key={r.id} className="p-3 bg-slate-50 rounded-2xl border border-slate-100 hover:bg-white hover:border-blue-100 transition-all group">
+                       <div className="flex justify-between items-start mb-1">
+                          <span className="text-[11px] font-black text-slate-800 uppercase line-clamp-1">{r.name}</span>
+                          <span className="text-[9px] font-mono font-bold text-blue-600">₹{r.totalAmount}</span>
+                       </div>
+                       <div className="flex justify-between items-center">
+                          <span className="text-[9px] font-bold text-slate-400 uppercase tracking-tighter">{r.date} &bull; {r.studentClass}</span>
+                          <div className={`text-[8px] font-black uppercase px-1.5 py-0.5 rounded ${
+                            r.paymentMode === 'Pending' ? 'text-amber-600 bg-amber-50' : 
+                            r.paymentMode === 'UPI' ? 'text-indigo-600 bg-indigo-50' : 'text-emerald-600 bg-emerald-50'
+                          }`}>
+                            {r.paymentMode}
+                          </div>
+                       </div>
+                    </div>
+                  ))
+                )}
+             </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BulkActionBar({ selectedCount, onClear, onBulkDelete, onBulkStatusUpdate, can }: any) {
+  return (
+    <motion.div 
+      initial={{ y: 100, x: '-50%', opacity: 0 }}
+      animate={{ y: 0, x: '-50%', opacity: 1 }}
+      exit={{ y: 100, x: '-50%', opacity: 0 }}
+      className="fixed bottom-10 left-1/2 z-[100] bg-slate-900 shadow-2xl text-white px-6 py-4 rounded-3xl flex items-center gap-6 border border-slate-700/50 backdrop-blur-md"
+    >
+      <div className="flex items-center gap-3 pr-6 border-r border-slate-700">
+        <div className="bg-blue-600 text-white w-8 h-8 rounded-full flex items-center justify-center font-black text-xs shadow-lg shadow-blue-500/20">{selectedCount}</div>
+        <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Selected</span>
       </div>
       
-      <AnimatePresence>
-        {showConfig && (
-          <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="bg-slate-900 text-white overflow-hidden">
-            <div className="p-5 space-y-4">
-              <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Custom Form Fields</h3>
-              <div className="space-y-2 max-h-56 overflow-y-auto custom-scroll pr-2">
-                {customFields.map((field: any) => (
-                  <div key={field.id} className="flex gap-2 bg-slate-800 p-2 rounded-lg border border-slate-700">
-                    <input type="text" value={field.label} onChange={(e) => updateCustomField(field.id, { label: e.target.value })} className="bg-transparent text-xs font-bold w-full outline-none focus:text-blue-400" />
-                    <select value={field.type} onChange={(e) => updateCustomField(field.id, { type: e.target.value as any })} className="bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[9px] font-black uppercase outline-none text-slate-400">
-                      <option value="text">TEXT</option>
-                      <option value="number">NUM</option>
-                      <option value="date">DATE</option>
-                    </select>
-                    <button onClick={() => removeCustomField(field.id)} className="text-slate-600 hover:text-red-400 transition-colors px-1"><X size={14} /></button>
-                  </div>
-                ))}
-              </div>
-              <form onSubmit={addCustomField} className="space-y-3 pt-2 border-t border-slate-800">
-                <div className="grid grid-cols-2 gap-2">
-                  <input name="label" placeholder="Grade/Section" className="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-xs outline-none" required />
-                  <select name="type" className="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-xs outline-none">
-                    <option value="text">Text</option>
-                    <option value="number">Number</option>
-                    <option value="date">Date</option>
-                  </select>
-                </div>
-                <button type="submit" className="bg-blue-600 text-white px-3 py-1 rounded-lg text-[10px] font-bold hover:bg-blue-500 w-full flex items-center justify-center gap-1">
-                  <Plus size={12} /> ADD FIELD
-                </button>
-              </form>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      <div className="p-6 space-y-6">
-        {formError && <div className="bg-red-50 text-red-600 p-3 rounded-xl border border-red-100 text-xs font-bold text-center">{formError}</div>}
-        
-        <div className="grid grid-cols-2 gap-4">
-          <div className="space-y-1">
-            <label htmlFor="srNo-input" className="block text-[10px] font-black text-slate-400 uppercase ml-1">Sr. No.</label>
-            <div className="relative">
-              <Hash className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-300 pointer-events-none" size={14} aria-hidden="true" />
-              <input id="srNo-input" value={srNo} onChange={(e) => setSrNo(Number(e.target.value))} type="number" className="w-full pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl outline-none text-xs font-medium" />
-            </div>
-          </div>
-          <div className="space-y-1">
-            <label htmlFor="transactionDate-input" className="block text-[10px] font-black text-slate-400 uppercase ml-1">Date</label>
-            <div className="relative">
-              <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-300 pointer-events-none" size={14} aria-hidden="true" />
-              <input id="transactionDate-input" value={transactionDate} onChange={(e) => setTransactionDate(e.target.value)} type="date" className="w-full pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl outline-none text-xs font-medium" />
-            </div>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div className="md:col-span-2 space-y-1">
-            <label htmlFor="studentName-input" className="block text-[10px] font-black text-slate-400 uppercase ml-1">Student Name</label>
-            <div className="relative">
-              <User className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-300" size={16} aria-hidden="true" />
-              <input id="studentName-input" value={studentName} onChange={(e) => setStudentName(e.target.value)} type="text" aria-required="true" className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl outline-none font-medium text-sm" placeholder="Full Name" />
-            </div>
-          </div>
-          <div className="space-y-1">
-            <label htmlFor="studentClass-select" className="block text-[10px] font-black text-slate-400 uppercase ml-1">Class</label>
-            <select 
-              id="studentClass-select" 
-              value={studentClass} 
-              onChange={(e) => setStudentClass(e.target.value)}
-              className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl outline-none text-sm font-medium transition-all"
-            >
-              {CLASSES.map(cls => <option key={cls} value={cls}>{cls}</option>)}
-            </select>
-          </div>
-        </div>
-
-        <div className="p-4 bg-slate-50 rounded-xl border border-slate-100 space-y-4">
-          <div className="grid grid-cols-2 gap-4">
-            <select value={newItem.item} onChange={(e) => setNewItem((p: any) => ({ ...p, item: e.target.value, size: Object.keys(pricing[e.target.value] || {})[0] }))} className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl outline-none text-sm">
-              {Object.keys(pricing).map(item => <option key={item} value={item}>{item}</option>)}
-            </select>
-            <select value={newItem.size} onChange={(e) => setNewItem((p: any) => ({ ...p, size: e.target.value }))} className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl outline-none text-sm">
-              {Object.keys(pricing[newItem.item] || {}).map(size => <option key={size} value={size}>{size}</option>)}
-            </select>
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <input value={newItem.qty} onChange={(e) => setNewItem((p: any) => ({ ...p, qty: Number(e.target.value) }))} type="number" min="1" className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl outline-none text-sm" placeholder="Qty" />
-            <div className="px-3 py-2 bg-slate-100 border border-slate-200 rounded-xl text-slate-500 font-mono font-bold text-sm flex items-center">₹ {currentRate}</div>
-          </div>
-          <input value={newItem.notes} onChange={(e) => setNewItem((p: any) => ({ ...p, notes: e.target.value }))} type="text" placeholder="Remarks..." className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl outline-none text-xs" />
-          
-          {customFields.map((field: any) => (
-             <div key={field.id} className="space-y-1">
-               <label className="text-[9px] font-black uppercase text-slate-400 ml-1">{field.label}</label>
-               <input type={field.type} value={customValues[field.id] || ''} onChange={(e) => setCustomValues((p: any) => ({ ...p, [field.id]: e.target.value }))} className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl outline-none text-xs font-medium" />
-             </div>
-          ))}
-
-          <button onClick={addToCart} className="w-full bg-blue-600 text-white font-bold py-2.5 rounded-xl hover:bg-blue-700 transition-all flex items-center justify-center gap-2 shadow-lg">
-            <PlusCircle size={16} /> ADD TO CART
+      {can('edit') && (
+        <div className="flex items-center gap-2">
+          <button 
+            onClick={() => onBulkStatusUpdate('UPI')}
+            className="px-4 py-2 hover:bg-slate-800 rounded-xl transition-all text-[10px] font-black uppercase tracking-widest flex items-center gap-2"
+          >
+            <CreditCard size={14} className="text-indigo-400" /> Mark UPI
+          </button>
+          <button 
+            onClick={() => onBulkStatusUpdate('Cash')}
+            className="px-4 py-2 hover:bg-slate-800 rounded-xl transition-all text-[10px] font-black uppercase tracking-widest flex items-center gap-2"
+          >
+            <span className="w-3.5 h-3.5 flex items-center justify-center text-emerald-400 font-bold">₹</span> Mark Cash
+          </button>
+          <button 
+            onClick={() => onBulkStatusUpdate('Pending')}
+            className="px-4 py-2 hover:bg-slate-800 rounded-xl transition-all text-[10px] font-black uppercase tracking-widest flex items-center gap-2"
+          >
+            <History size={14} className="text-amber-400" /> Mark Pending
           </button>
         </div>
+      )}
 
-        <div className="space-y-1">
-          <label htmlFor="generalNotes-input" className="block text-[10px] font-black text-slate-400 uppercase ml-1">Transaction Notes (General Remarks)</label>
-          <textarea 
-            id="generalNotes-input" 
-            value={generalNotes} 
-            onChange={(e) => setGeneralNotes(e.target.value)}
-            className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none text-sm font-medium resize-none min-h-[80px] focus:border-blue-300 transition-all"
-            placeholder="Enter general remarks for this entire sale..."
-          />
-        </div>
-
-        {cart.length > 0 && (
-          <div className="space-y-4 pt-4 border-t border-slate-100">
-             <div className="space-y-2">
-                {cart.map((item: any) => (
-                  <div key={item.id} className="flex justify-between items-center bg-slate-50 p-2 rounded-lg border border-slate-100">
-                     <div className="text-[10px] font-bold text-slate-700">{item.item} ({item.size}) x{item.qty}</div>
-                     <button onClick={() => removeFromCart(item.id)} className="text-red-400 p-1"><X size={12} /></button>
-                  </div>
-                ))}
-             </div>
-             <div className="p-4 bg-slate-900 rounded-xl text-white">
-                <div className="flex justify-between items-center mb-3">
-                  <span className="text-[10px] uppercase font-black tracking-widest text-slate-500">Total payable</span>
-                  <span className="text-lg font-black font-mono">₹ {cartTotal}</span>
-                </div>
-                <div className="space-y-3">
-                   <select value={paymentMode} onChange={(e) => setPaymentMode(e.target.value)} className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white outline-none">
-                      <option value="Pending">Pending / Credit</option>
-                      <option value="UPI">UPI Payment</option>
-                      <option value="Cash">Cash Payment</option>
-                   </select>
-                   {paymentMode !== 'Pending' && (
-                     <div className="flex gap-2">
-                        <input type="number" value={paidAmount} onChange={(e) => setPaidAmount(e.target.value)} placeholder="Paid ₹" className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white outline-none" />
-                        <input type="date" value={paymentDate} onChange={(e) => setPaymentDate(e.target.value)} className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white outline-none" />
-                     </div>
-                   )}
-                </div>
-                <button onClick={submitTransaction} className="w-full bg-blue-600 text-white font-bold py-3 rounded-lg mt-4 shadow-xl hover:bg-blue-500 text-xs">COMPLETE TRANSACTION</button>
-             </div>
-          </div>
+      <div className="flex items-center gap-2 pl-6 border-l border-slate-700">
+        {can('delete') && (
+          <button 
+            onClick={onBulkDelete}
+            className="p-2 text-red-400 hover:bg-red-500/10 rounded-xl transition-all"
+            title="Delete selected"
+          >
+            <Trash2 size={18} />
+          </button>
         )}
+        <button 
+          onClick={onClear}
+          className="p-2 text-slate-400 hover:bg-slate-800 rounded-xl transition-all"
+          title="Clear selection"
+        >
+          <X size={18} />
+        </button>
       </div>
-    </section>
+    </motion.div>
   );
 }
 
@@ -1777,15 +2635,41 @@ function LedgerSection({
   setDateEnd, 
   exportCSV, 
   handlePrint, 
-  deleteRecord, 
+  deleteRecord,
+  setEditingRecord,
+  updateRecord,
+  addRecord,
+  selectedRecordIds,
+  setSelectedRecordIds,
+  bulkDeleteRecords,
+  bulkUpdateStatus,
   customFields, 
   grandTotal, 
-  pricing 
+  pricing,
+  can
 }: any) {
+  const [editingCell, setEditingCell] = useState<{ id: string, field: string } | null>(null);
+  const [quickAdd, setQuickAdd] = useState({ name: '', studentClass: CLASSES[0], notes: '' });
   const itemNames = Object.keys(pricing);
 
+  const toggleSelectAll = () => {
+    if (selectedRecordIds.length === records.length) {
+      setSelectedRecordIds([]);
+    } else {
+      setSelectedRecordIds(records.map((r: any) => r.id));
+    }
+  };
+
+  const toggleSelectRecord = (id: string) => {
+    if (selectedRecordIds.includes(id)) {
+      setSelectedRecordIds(selectedRecordIds.filter((rid: string) => rid !== id));
+    } else {
+      setSelectedRecordIds([...selectedRecordIds, id]);
+    }
+  };
+
   return (
-    <div className="bg-white rounded-2xl shadow-md border border-slate-200 flex flex-col min-h-[70vh] overflow-hidden print:shadow-none print:border-none">
+    <div className="bg-white rounded-2xl shadow-md border border-slate-200 flex flex-col min-h-[70vh] overflow-hidden print:shadow-none print:border-none relative">
       <div className="px-6 py-5 border-b border-slate-100 bg-white print:hidden">
         <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-6">
           <div className="space-y-1">
@@ -1867,14 +2751,37 @@ function LedgerSection({
         </div>
       </div>
       
-      <div className="flex-1 overflow-x-auto custom-scroll print:overflow-visible">
-        <table className="w-full text-left border-separate border-spacing-0 print:border-collapse">
-          <thead className="sticky top-0 bg-slate-50/95 backdrop-blur shadow-sm z-10 print:static print:bg-white text-[9px] uppercase tracking-widest font-black">
+      <div className="hidden print:block mb-8 border-b-2 border-slate-900 pb-6 uppercase font-black">
+        <div className="flex justify-between items-end">
+          <div>
+            <h1 className="text-3xl tracking-tight">Sales Spreadsheet Report</h1>
+            <p className="text-sm text-slate-500 mt-1">Generated on {new Date().toLocaleDateString()} • Next-Gen International</p>
+          </div>
+          <div className="text-right">
+            <p className="text-[10px] text-slate-400">Ledger Count</p>
+            <p className="text-lg font-black">{records.length} Transactions</p>
+          </div>
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-x-auto custom-scroll print:overflow-visible pb-24">
+        <table className="w-full text-left border-separate border-spacing-0 print:border-collapse print:text-[10px]">
+          <thead className="sticky top-0 z-30 bg-slate-50 border-b border-slate-200 print:static print:bg-white text-[9px] uppercase tracking-widest font-black">
             {/* Top Header Row for Items */}
             <tr className="text-slate-400">
-              <th rowSpan={2} className="px-4 py-4 border-b border-r border-slate-100 min-w-[50px]">Sr.</th>
-              <th rowSpan={2} className="px-4 py-4 border-b border-r border-slate-100 min-w-[100px]">Date</th>
-              <th rowSpan={2} className="px-6 py-4 border-b border-r border-slate-100 min-w-[150px]">Student & Notes</th>
+              <th rowSpan={2} className="sticky left-0 z-40 bg-slate-50 px-4 py-4 border-b border-r border-slate-100 min-w-[50px] print:hidden">
+                {can('delete') && (
+                  <input 
+                    type="checkbox" 
+                    checked={records.length > 0 && selectedRecordIds.length === records.length}
+                    onChange={toggleSelectAll}
+                    className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                  />
+                )}
+              </th>
+              <th rowSpan={2} className="sticky left-[50px] z-40 bg-slate-50 px-4 py-4 border-b border-r border-slate-100 min-w-[50px]">Sr.</th>
+              <th rowSpan={2} className="sticky left-[100px] z-40 bg-slate-50 px-4 py-4 border-b border-r border-slate-100 min-w-[100px]">Date</th>
+              <th rowSpan={2} className="sticky left-[200px] z-40 bg-slate-50 px-6 py-4 border-b border-r-[2px] border-slate-200 min-w-[180px] shadow-[2px_0_5px_rgba(0,0,0,0.05)]">Student & Notes</th>
               
               {itemNames.map(name => (
                 <th key={name} colSpan={3} className="px-6 py-4 border-b border-r border-slate-200 bg-blue-50/50 text-blue-600 text-center">
@@ -1885,7 +2792,7 @@ function LedgerSection({
               <th rowSpan={2} className="px-6 py-4 border-b border-r border-slate-100">Total Qty</th>
               <th rowSpan={2} className="px-6 py-4 border-b border-r border-slate-100 text-right min-w-[100px]">Grand Total</th>
               <th rowSpan={2} className="px-6 py-4 border-b border-slate-100 min-w-[100px]">Payment</th>
-              <th rowSpan={2} className="px-6 py-4 border-b border-slate-100 print:hidden"></th>
+              <th rowSpan={2} className="px-6 py-4 border-b border-slate-100 print:hidden text-center">Action</th>
             </tr>
             
             {/* Sub-header Row for Size/Qty/Price */}
@@ -1900,17 +2807,167 @@ function LedgerSection({
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
+            {/* Quick Add Row */}
+            {can('add') && (
+              <tr className="bg-blue-50/20 group/quickadd print:hidden">
+                <td className="sticky left-0 z-20 bg-blue-50/30 px-4 py-3 border-r border-slate-50"></td>
+                <td className="sticky left-[50px] z-20 bg-blue-50/30 px-4 py-3 border-r border-slate-50 font-mono text-[10px] text-blue-400 font-bold italic">NEW</td>
+                <td className="sticky left-[100px] z-20 bg-blue-50/30 px-4 py-3 border-r border-slate-50 font-mono text-[10px] text-slate-400 italic">Auto</td>
+                <td className="sticky left-[200px] z-20 bg-blue-50/30 px-6 py-3 border-r-[2px] border-slate-100 shadow-[2px_0_5px_rgba(0,0,0,0.02)]">
+                  <div className="space-y-1">
+                    <input 
+                      type="text"
+                      placeholder="Quick Add Name..."
+                      className="w-full px-2 py-1 text-xs border border-slate-200 rounded outline-none focus:border-blue-400 bg-white"
+                      value={quickAdd.name}
+                      onChange={(e) => setQuickAdd(p => ({ ...p, name: e.target.value }))}
+                    />
+                    <div className="flex gap-2">
+                      <select
+                        className="text-[9px] px-1 py-0.5 border border-slate-200 rounded outline-none bg-white font-bold"
+                        value={quickAdd.studentClass}
+                        onChange={(e) => setQuickAdd(p => ({ ...p, studentClass: e.target.value }))}
+                      >
+                        {CLASSES.map(cls => <option key={cls} value={cls}>{cls}</option>)}
+                      </select>
+                      <input 
+                        type="text"
+                        placeholder="Add notes..."
+                        className="text-[9px] px-2 py-0.5 border border-slate-200 rounded outline-none w-full bg-white"
+                        value={quickAdd.notes}
+                        onChange={(e) => setQuickAdd(p => ({ ...p, notes: e.target.value }))}
+                      />
+                    </div>
+                  </div>
+                </td>
+                {itemNames.map(name => (
+                  <React.Fragment key={`quick-${name}`}>
+                    <td className="px-3 py-3 border-r border-slate-50 bg-slate-50/30"></td>
+                    <td className="px-3 py-3 border-r border-slate-50 bg-slate-50/30"></td>
+                    <td className="px-3 py-3 border-r border-slate-50 bg-slate-50/30"></td>
+                  </React.Fragment>
+                ))}
+                <td colSpan={3} className="px-6 py-3 text-right">
+                  <button 
+                    disabled={!quickAdd.name.trim()}
+                    onClick={() => {
+                      const timestamp = new Date().toISOString();
+                      const displayDate = new Date().toLocaleDateString('en-IN');
+                      const nextSr = allRecords.length > 0 ? Math.max(...allRecords.map((r:any) => r.srNo)) + 1 : 1;
+                      
+                      const newRec: any = {
+                        id: crypto.randomUUID(),
+                        srNo: nextSr,
+                        name: quickAdd.name,
+                        studentClass: quickAdd.studentClass,
+                        items: [],
+                        totalAmount: 0,
+                        discount: 0,
+                        date: displayDate,
+                        timestamp,
+                        paymentMode: 'Pending',
+                        notes: quickAdd.notes
+                      };
+                      
+                      addRecord(newRec);
+                      setQuickAdd({ name: '', studentClass: CLASSES[0], notes: '' });
+                    }}
+                    className="px-4 py-1.5 bg-blue-600 text-white rounded-lg text-[9px] font-black uppercase tracking-widest disabled:opacity-20 hover:bg-blue-700 transition-all shadow-md shadow-blue-500/20"
+                  >
+                    Quick Add
+                  </button>
+                </td>
+              </tr>
+            )}
+
             {records.map((rec: any) => (
-              <tr key={rec.id} className="hover:bg-slate-50 transition-colors text-xs print:hover:bg-transparent">
-                <td className="px-4 py-4 font-mono font-bold text-slate-400 border-r border-slate-50 print:text-black">#{rec.srNo}</td>
-                <td className="px-4 py-4 text-slate-400 font-mono border-r border-slate-50 print:text-black">{rec.date}</td>
-                <td className="px-6 py-4 border-r border-slate-50">
-                  <div className="font-bold text-slate-700 uppercase leading-none">{rec.name}</div>
+              <tr key={rec.id} className={`hover:bg-slate-50 transition-colors text-xs print:hover:bg-transparent group/row ${selectedRecordIds.includes(rec.id) ? 'bg-blue-50/30' : ''}`}>
+                <td className="sticky left-0 z-10 bg-inherit px-4 py-4 border-r border-slate-50 print:hidden text-center group-hover/row:bg-slate-100">
+                  {can('delete') && (
+                    <input 
+                      type="checkbox" 
+                      checked={selectedRecordIds.includes(rec.id)}
+                      onChange={() => toggleSelectRecord(rec.id)}
+                      className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer w-4 h-4"
+                    />
+                  )}
+                </td>
+                <td className="sticky left-[50px] z-10 bg-inherit px-4 py-4 font-mono font-bold text-slate-400 border-r border-slate-50 print:text-black group-hover/row:bg-slate-100">#{rec.srNo}</td>
+                <td className="sticky left-[100px] z-10 bg-inherit px-4 py-4 text-slate-400 font-mono border-r border-slate-50 print:text-black group-hover/row:bg-slate-100">{rec.date}</td>
+                <td className="sticky left-[200px] z-10 bg-inherit px-6 py-4 border-r-[2px] border-slate-100 shadow-[2px_0_5px_rgba(0,0,0,0.02)] group-hover/row:bg-slate-100">
+                  {can('edit') && editingCell?.id === rec.id && editingCell?.field === 'name' ? (
+                    <input 
+                      autoFocus
+                      type="text"
+                      className="w-full px-2 py-1 text-xs border border-blue-500 rounded outline-none"
+                      defaultValue={rec.name}
+                      onBlur={(e) => {
+                        updateRecord(rec.id, { name: e.target.value });
+                        setEditingCell(null);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') e.currentTarget.blur();
+                        if (e.key === 'Escape') setEditingCell(null);
+                      }}
+                    />
+                  ) : (
+                    <div 
+                      className={`font-bold text-slate-700 uppercase leading-none rounded px-1 transition-colors ${can('edit') ? 'cursor-pointer hover:bg-blue-50/50' : ''}`}
+                      onClick={() => can('edit') && setEditingCell({ id: rec.id, field: 'name' })}
+                    >
+                      {rec.name}
+                    </div>
+                  )}
+                  
                   <div className="flex flex-wrap gap-2 mt-1.5 items-center">
-                    <div className="text-[9px] text-slate-400 font-black uppercase tracking-tighter shadow-sm inline-block px-1.5 py-0.5 bg-slate-100 rounded border border-slate-200 print:border-slate-300 print:bg-transparent">{rec.studentClass}</div>
-                    {rec.notes && (
-                      <div className="text-[8px] text-blue-500 font-medium italic truncate max-w-[120px]" title={rec.notes}>
-                        &ldquo;{rec.notes}&rdquo;
+                    {can('edit') && editingCell?.id === rec.id && editingCell?.field === 'studentClass' ? (
+                      <select
+                        autoFocus
+                        className="text-[9px] px-1 py-0.5 border border-blue-500 rounded outline-none bg-white"
+                        defaultValue={rec.studentClass}
+                        onBlur={(e) => {
+                          updateRecord(rec.id, { studentClass: e.target.value });
+                          setEditingCell(null);
+                        }}
+                        onChange={(e) => {
+                          updateRecord(rec.id, { studentClass: e.target.value });
+                          setEditingCell(null);
+                        }}
+                      >
+                        {CLASSES.map(cls => <option key={cls} value={cls}>{cls}</option>)}
+                      </select>
+                    ) : (
+                      <div 
+                        className={`text-[9px] text-slate-400 font-black uppercase tracking-tighter shadow-sm inline-block px-1.5 py-0.5 bg-slate-100 rounded border border-slate-200 print:border-slate-300 print:bg-transparent transition-all ${can('edit') ? 'cursor-pointer hover:border-blue-300 hover:text-blue-600' : ''}`}
+                        onClick={() => can('edit') && setEditingCell({ id: rec.id, field: 'studentClass' })}
+                      >
+                        {rec.studentClass}
+                      </div>
+                    )}
+
+                    {can('edit') && editingCell?.id === rec.id && editingCell?.field === 'notes' ? (
+                      <input 
+                        autoFocus
+                        type="text"
+                        placeholder="Add notes..."
+                        className="text-[9px] px-2 py-0.5 border border-blue-500 rounded outline-none w-full"
+                        defaultValue={rec.notes || ''}
+                        onBlur={(e) => {
+                          updateRecord(rec.id, { notes: e.target.value });
+                          setEditingCell(null);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') e.currentTarget.blur();
+                          if (e.key === 'Escape') setEditingCell(null);
+                        }}
+                      />
+                    ) : (
+                      <div 
+                        className={`text-[8px] text-blue-500 font-medium italic truncate max-w-[120px] px-1 rounded ${can('edit') ? 'cursor-pointer hover:bg-blue-50' : ''}`} 
+                        title={rec.notes || 'Notes'}
+                        onClick={() => can('edit') && setEditingCell({ id: rec.id, field: 'notes' })}
+                      >
+                        &ldquo;{rec.notes || '...'}&rdquo;
                       </div>
                     )}
                   </div>
@@ -1941,14 +2998,64 @@ function LedgerSection({
                   ₹ {rec.totalAmount}
                 </td>
                 <td className="px-6 py-4 min-w-[120px]">
-                  <div className={`px-2 py-0.5 rounded text-[8px] font-black uppercase border inline-block ${
-                    rec.paymentMode === 'Pending' ? 'bg-amber-50 text-amber-600 border-amber-100 print:bg-transparent print:border-slate-300' :
-                    rec.paymentMode === 'UPI' ? 'bg-indigo-50 text-indigo-600 border-indigo-100 print:bg-transparent print:border-slate-300' :
-                    'bg-emerald-50 text-emerald-600 border-emerald-100 print:bg-transparent print:border-slate-300'
-                  }`}>{rec.paymentMode}</div>
+                  {can('edit') && editingCell?.id === rec.id && editingCell?.field === 'paymentMode' ? (
+                    <select
+                      autoFocus
+                      className="text-[9px] px-2 py-1 border border-blue-500 rounded outline-none bg-white w-full"
+                      defaultValue={rec.paymentMode}
+                      onBlur={() => setEditingCell(null)}
+                      onChange={(e) => {
+                        const mode = e.target.value as PaymentMode;
+                        const updates: any = { paymentMode: mode };
+                        if (mode !== 'Pending' && !rec.paidAmount) {
+                          updates.paidAmount = rec.totalAmount;
+                          updates.paymentDate = new Date().toISOString().split('T')[0];
+                        } else if (mode === 'Pending') {
+                          updates.paidAmount = null;
+                          updates.paymentDate = null;
+                        }
+                        updateRecord(rec.id, updates);
+                        setEditingCell(null);
+                      }}
+                    >
+                      <option value="Pending">Pending</option>
+                      <option value="UPI">UPI</option>
+                      <option value="Cash">Cash</option>
+                    </select>
+                  ) : (
+                    <div 
+                      onClick={() => can('edit') && setEditingCell({ id: rec.id, field: 'paymentMode' })}
+                      className={`px-2 py-0.5 rounded text-[8px] font-black uppercase border inline-block cursor-pointer transition-all ${
+                        rec.paymentMode === 'Pending' ? 'bg-amber-50 text-amber-600 border-amber-100' :
+                        rec.paymentMode === 'UPI' ? 'bg-indigo-50 text-indigo-600 border-indigo-100' :
+                        'bg-emerald-50 text-emerald-600 border-emerald-100'
+                      } ${!can('edit') ? 'cursor-default' : ''}`}
+                    >
+                      {rec.paymentMode}
+                    </div>
+                  )}
                 </td>
-                <td className="px-4 py-4 text-right print:hidden">
-                  <button onClick={() => deleteRecord(rec.id)} className="text-slate-200 hover:text-red-500 p-2 transition-all"><Trash2 size={14} /></button>
+                <td className="px-4 py-4 text-center print:hidden border-l border-slate-50">
+                  <div className="flex items-center justify-center gap-1">
+                    {can('edit') && (
+                      <button 
+                        onClick={() => setEditingRecord(rec)} 
+                        title="Edit record"
+                        className="text-slate-300 hover:text-blue-600 p-2 rounded-xl hover:bg-blue-50 transition-all opacity-0 group-hover/row:opacity-100 focus:opacity-100"
+                      >
+                        <Pencil size={16} />
+                      </button>
+                    )}
+                    {can('delete') && (
+                      <button 
+                        onClick={() => deleteRecord(rec.id)} 
+                        title="Delete record"
+                        className="text-slate-300 hover:text-red-600 p-2 rounded-xl hover:bg-red-50 transition-all opacity-0 group-hover/row:opacity-100 focus:opacity-100"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    )}
+                  </div>
                 </td>
               </tr>
             ))}
@@ -1969,6 +3076,45 @@ function LedgerSection({
          </div>
          <div className="text-[10px] font-black text-slate-500 uppercase tracking-widest hidden sm:block print:block">Structured CRM Data</div>
       </div>
+
+      <AnimatePresence>
+        {selectedRecordIds.length > 0 && (
+          <BulkActionBar 
+            selectedCount={selectedRecordIds.length}
+            onClear={() => setSelectedRecordIds([])}
+            onBulkDelete={() => bulkDeleteRecords(selectedRecordIds)}
+            onBulkStatusUpdate={(mode: PaymentMode) => bulkUpdateStatus(selectedRecordIds, mode)}
+            can={can}
+          />
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+function ConfirmDialog({ isOpen, title, message, onConfirm, onCancel, type = 'danger' }: any) {
+  if (!isOpen) return null;
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+      <motion.div 
+        initial={{ scale: 0.95, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        className="bg-white rounded-3xl shadow-2xl max-w-md w-full overflow-hidden font-sans"
+      >
+        <div className="p-8 space-y-6">
+          <div className={`w-16 h-16 rounded-2xl flex items-center justify-center mx-auto ${type === 'danger' ? 'bg-red-50 text-red-500' : 'bg-blue-50 text-blue-500'}`}>
+            {type === 'danger' ? <Trash2 size={32} /> : <Info size={32} />}
+          </div>
+          <div className="text-center space-y-2">
+            <h3 className="text-xl font-bold text-slate-800">{title}</h3>
+            <p className="text-sm text-slate-500 font-medium leading-relaxed">{message}</p>
+          </div>
+          <div className="flex gap-3">
+            <button onClick={onCancel} className="flex-1 px-6 py-3 bg-slate-100 text-slate-600 rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-200 transition-all">Cancel</button>
+            <button onClick={() => { onConfirm(); onCancel(); }} className={`flex-1 px-6 py-3 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest transition-all shadow-lg ${type === 'danger' ? 'bg-red-600 hover:bg-red-700 shadow-red-500/20' : 'bg-blue-600 hover:bg-blue-700 shadow-blue-500/20'}`}>Confirm</button>
+          </div>
+        </div>
+      </motion.div>
     </div>
   );
 }
