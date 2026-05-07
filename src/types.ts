@@ -9,8 +9,14 @@ export interface User {
   createdAt: string;
 }
 
+export interface StockInfo {
+  price: number;
+  stock: number;
+  minStock: number;
+}
+
 export interface SizePricing {
-  [size: string]: number;
+  [size: string]: StockInfo;
 }
 
 export interface Pricing {
@@ -27,6 +33,7 @@ export interface SaleRecord {
   items: CartItem[];
   totalAmount: number;
   discount?: number;
+  discountPercent?: number;
   date: string;
   timestamp: string;
   paymentMode: PaymentMode;

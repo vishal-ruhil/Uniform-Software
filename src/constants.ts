@@ -1,10 +1,26 @@
 import { Pricing } from "./types";
 
 export const DEFAULT_PRICING: Pricing = {
-  "Polo Shirt": { "S": 450, "M": 500, "L": 550 },
-  "Trousers": { "28": 800, "30": 850, "32": 900 },
-  "Skirt": { "24": 600, "26": 650, "28": 700 },
-  "Blazer": { "32": 1500, "34": 1650, "36": 1800 }
+  "Polo Shirt": { 
+    "S": { price: 450, stock: 50, minStock: 10 }, 
+    "M": { price: 500, stock: 45, minStock: 10 }, 
+    "L": { price: 550, stock: 35, minStock: 10 } 
+  },
+  "Trousers": { 
+    "28": { price: 800, stock: 30, minStock: 5 }, 
+    "30": { price: 850, stock: 25, minStock: 5 }, 
+    "32": { price: 900, stock: 20, minStock: 5 } 
+  },
+  "Skirt": { 
+    "24": { price: 600, stock: 15, minStock: 5 }, 
+    "26": { price: 650, stock: 12, minStock: 5 }, 
+    "28": { price: 700, stock: 10, minStock: 5 } 
+  },
+  "Blazer": { 
+    "32": { price: 1500, stock: 8, minStock: 2 }, 
+    "34": { price: 1650, stock: 5, minStock: 2 }, 
+    "36": { price: 1800, stock: 3, minStock: 2 } 
+  }
 };
 
 export const STORAGE_KEYS = {
