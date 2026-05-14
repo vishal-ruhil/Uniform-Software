@@ -1,0 +1,79 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile and role metadata.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "email": { "type": "string" },
+        "name": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "role": { "type": "string", "enum": ["Admin", "Editor", "Viewer"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "email", "name", "role", "createdAt"]
+    },
+    "Pricing": {
+      "title": "Pricing",
+      "description": "Uniform items with sizes and stock information.",
+      "type": "object",
+      "properties": {
+        "data": { "type": "object" }
+      },
+      "required": ["data"]
+    },
+    "SaleRecord": {
+      "title": "Sale Record",
+      "description": "A single sale transaction document.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "srNo": { "type": "number" },
+        "name": { "type": "string" },
+        "studentClass": { "type": "string" },
+        "items": { "type": "array" },
+        "totalAmount": { "type": "number" },
+        "discountPercent": { "type": "number" },
+        "date": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "paymentMode": { "type": "string", "enum": ["UPI", "Cash", "Pending"] },
+        "paidAmount": { "type": "number" },
+        "paymentDate": { "type": "string" },
+        "notes": { "type": "string" },
+        "customData": { "type": "object" }
+      },
+      "required": ["id", "srNo", "name", "studentClass", "items", "totalAmount", "date", "timestamp", "paymentMode"]
+    },
+    "CustomField": {
+      "title": "Custom Field",
+      "description": "Dynamic field definition for sales records.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "label": { "type": "string" },
+        "type": { "type": "string", "enum": ["text", "number", "date"] },
+        "required": { "type": "boolean" }
+      },
+      "required": ["id", "label", "type", "required"]
+    }
+  },
+  "firestore": {
+    "users": {
+      "schema": "User",
+      "description": "Collection of user profiles."
+    },
+    "pricing/current": {
+      "schema": "Pricing",
+      "description": "Singleton document containing all item pricing and stock."
+    },
+    "sales": {
+      "schema": "SaleRecord",
+      "description": "Collection of transaction records."
+    },
+    "settings/customFields": {
+      "schema": "object",
+      "description": "Singleton document for dynamic field configuration."
+    }
+  }
+}

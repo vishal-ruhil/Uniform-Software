@@ -1,0 +1,127 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+  
+    // 0. Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helpers ---
+    function isSignedIn() { return request.auth != null; }
+    function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    
+    // Whitelisted Admin Emails
+    function isWhitelistedAdmin() {
+      return isSignedIn() && (request.auth.token.email in [
+        'vishal@unicrm.in', 
+        'vishaldalamwala@gmail.com', 
+        'ruhilvishal123@gmail.com'
+      ]);
+    }
+
+    function isAdmin() {
+      return isWhitelistedAdmin() || (
+        isSignedIn() && 
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Admin'
+      );
+    }
+    
+    function isEditor() {
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Editor'
+      );
+    }
+
+    function canWriteData() {
+      return isAdmin() || isEditor();
+    }
+
+    // --- Validation Helpers ---
+    
+    function isValidId(id) { 
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); 
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['id', 'email', 'name', 'role', 'createdAt']) &&
+             data.id is string && data.id.size() <= 128 &&
+             data.email is string && data.email.size() <= 128 &&
+             data.name is string && data.name.size() <= 100 &&
+             data.role in ['Admin', 'Editor', 'Viewer'] &&
+             data.createdAt is string; // ISO string
+    }
+
+    function isValidSale(data) {
+      return data.keys().hasAll(['id', 'srNo', 'name', 'studentClass', 'items', 'totalAmount', 'date', 'timestamp', 'paymentMode']) &&
+             data.id is string &&
+             data.srNo is number &&
+             data.name is string && data.name.size() <= 100 &&
+             data.items is list && data.items.size() <= 50 &&
+             data.totalAmount is number &&
+             data.date is string &&
+             data.timestamp is string &&
+             data.paymentMode in ['UPI', 'Cash', 'Pending'];
+    }
+
+    // --- User Profiles ---
+    match /users/{userId} {
+      allow get: if isOwner(userId) || isAdmin();
+      allow list: if isAdmin();
+      
+      allow create: if isOwner(userId) && isValidUser(incoming()) && (
+        incoming().role == 'Viewer' || 
+        incoming().role == 'Editor' ||
+        (incoming().role == 'Admin' && isWhitelistedAdmin())
+      );
+      
+      allow update: if isSignedIn() && (
+        (isOwner(userId) && (
+          // Immutable fields check
+          incoming().id == existing().id &&
+          incoming().email == existing().email &&
+          incoming().createdAt == existing().createdAt &&
+          (
+            // Action: Basic Info update
+            (incoming().diff(existing()).affectedKeys().hasOnly(['name', 'photoURL']) &&
+             (!('name' in incoming()) || (incoming().name is string && incoming().name.size() <= 100)) &&
+             (!('photoURL' in incoming()) || (incoming().photoURL is string && incoming().photoURL.size() <= 2048))) ||
+            
+            // Action: Self-Promotion (Whitelisted Only)
+            (incoming().diff(existing()).affectedKeys().hasOnly(['role']) && isWhitelistedAdmin()) ||
+
+            // Action: Full Update (No role change or whitelisted role change)
+            (incoming().role == existing().role || isWhitelistedAdmin())
+          )
+        )) || 
+        isAdmin()
+      );
+      
+      allow delete: if isAdmin() && userId != request.auth.uid;
+    }
+
+    // --- Pricing & Inventory ---
+    match /pricing/{docId} {
+      allow read: if isSignedIn();
+      allow write: if canWriteData() && isValidId(docId);
+    }
+
+    // --- Sales Records ---
+    match /sales/{saleId} {
+      allow read: if isSignedIn();
+      allow create: if canWriteData() && isValidSale(incoming());
+      allow update: if canWriteData(); // Usually we want stricter update logic, but keeping it simple for now
+      allow delete: if isAdmin();
+    }
+
+    // --- Settings ---
+    match /settings/{settingId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin() && isValidId(settingId);
+    }
+  }
+}

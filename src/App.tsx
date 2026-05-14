@@ -8,6 +8,7 @@ import {
   Trash2, 
   FileDown, 
   Printer,
+  PackageSearch,
   LayoutDashboard,
   CreditCard,
   History,
@@ -27,7 +28,11 @@ import {
   ArrowRight,
   Search,
   ChevronDown,
+  ChevronUp,
   Check,
+  CheckCircle2,
+  Loader2,
+  ArrowLeft,
   Info,
   AlertCircle,
   Tag,
@@ -44,7 +49,12 @@ import {
   Bell,
   DownloadCloud,
   Users,
-  Upload
+  Upload,
+  CloudLightning,
+  CheckCircle,
+  ExternalLink,
+  RefreshCw,
+  Share
 } from 'lucide-react';
 import { 
   LineChart, 
@@ -60,26 +70,100 @@ import {
   Pie,
   Cell
 } from 'recharts';
-import { motion, AnimatePresence } from 'motion/react';
+import { motion, AnimatePresence, Reorder } from 'motion/react';
+import * as XLSX from 'xlsx';
+import { initializeApp } from 'firebase/app';
+import { 
+  getAuth, 
+  onAuthStateChanged, 
+  signInWithEmailAndPassword, 
+  signOut,
+  GoogleAuthProvider,
+  signInWithPopup,
+  sendEmailVerification,
+  sendPasswordResetEmail
+} from 'firebase/auth';
+import { 
+  getFirestore, 
+  doc, 
+  setDoc, 
+  getDoc, 
+  onSnapshot, 
+  collection, 
+  query, 
+  orderBy, 
+  addDoc, 
+  deleteDoc, 
+  writeBatch,
+  updateDoc,
+  getDocs,
+  getDocFromServer
+} from 'firebase/firestore';
+
+import firebaseConfig from '../firebase-applet-config.json';
 import { Pricing, SaleRecord, SizePricing, CartItem, CustomField, PaymentMode, UserRole, User } from './types';
 import { DEFAULT_PRICING, CLASSES } from './constants';
+import { initGsi, getAccessToken } from './services/auth';
+import * as sheetService from './services/sheetService';
 
-const INITIAL_ADMIN: User = {
-  id: 'admin-1',
-  email: 'ruhilvishal123@gmail.com',
-  name: 'Admin User',
-  password: 'Password@1',
-  role: 'Admin',
-  createdAt: new Date().toISOString()
-};
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+
+async function testConnection() {
+  try {
+    // Testing connection to a dummy path as per instructions
+    await getDocFromServer(doc(db, 'test', 'connection'));
+  } catch (error: any) {
+    if(error instanceof Error && (error.message.includes('the client is offline') || error.message.includes('Could not reach Cloud Firestore'))) {
+      console.error("CRITICAL: Firestore is offline. Please check if the database is provisioned and reachable.");
+    }
+  }
+}
+testConnection();
+
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+    },
+    operationType,
+    path
+  }
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
 
 export default function App() {
   // --- Auth State ---
   const [user, setUser] = useState<User | null>(null);
-  const [users, setUsers] = useState<User[]>(() => {
-    const saved = localStorage.getItem('uniform_users');
-    return saved ? JSON.parse(saved) : [INITIAL_ADMIN];
-  });
+  const [users, setUsers] = useState<User[]>([]);
   const [confirmState, setConfirmState] = useState<{ 
     isOpen: boolean; 
     title: string; 
@@ -96,48 +180,49 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(true);
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
+  const [isOffline, setIsOffline] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
+  
+  const [isSignUp, setIsSignUp] = useState(false);
+
+  const triggerRetry = () => {
+    setRetryCount(prev => prev + 1);
+    setAuthLoading(true);
+    setIsOffline(false);
+  };
   
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [name, setName] = useState('');
   const [editingRecord, setEditingRecord] = useState<SaleRecord | null>(null);
   const [selectedRecordIds, setSelectedRecordIds] = useState<string[]>([]);
 
   // --- State ---
-  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(() => {
+    const saved = localStorage.getItem('sidebar_collapsed');
+    return saved ? JSON.parse(saved) : false;
+  });
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'pricing' | 'sales' | 'ledger' | 'reports' | 'profile' | 'admin'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'pricing' | 'sales' | 'ledger' | 'reports' | 'profile' | 'admin'>(() => {
+    return (localStorage.getItem('active_tab') as any) || 'dashboard';
+  });
+
+  useEffect(() => {
+    localStorage.setItem('active_tab', activeTab);
+  }, [activeTab]);
+
+  useEffect(() => {
+    localStorage.setItem('sidebar_collapsed', JSON.stringify(isSidebarCollapsed));
+  }, [isSidebarCollapsed]);
   const [pricingMode, setPricingMode] = useState<'prices' | 'inventory'>('prices');
-  const [pricing, setPricing] = useState<Pricing>(() => {
-    const saved = localStorage.getItem('uniform_pricing');
-    if (!saved) return DEFAULT_PRICING;
-    const parsed = JSON.parse(saved);
-    
-    // Migration check: if any size mapping is a number instead of an object, migrate it
-    let needsMigration = false;
-    const migrated: any = {};
-    
-    Object.entries(parsed).forEach(([item, sizes]: [string, any]) => {
-      migrated[item] = {};
-      Object.entries(sizes).forEach(([size, priceInfo]: [string, any]) => {
-        if (typeof priceInfo === 'number') {
-          needsMigration = true;
-          migrated[item][size] = { price: priceInfo, stock: 0, minStock: 5 };
-        } else {
-          migrated[item][size] = priceInfo;
-        }
-      });
-    });
-    
-    return needsMigration ? migrated : parsed;
-  });
-  const [records, setRecords] = useState<SaleRecord[]>(() => {
-    const saved = localStorage.getItem('uniform_records');
-    return saved ? JSON.parse(saved) : [];
-  });
-  const [customFields, setCustomFields] = useState<CustomField[]>(() => {
-    const saved = localStorage.getItem('uniform_custom_fields');
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [pricing, setPricing] = useState<Pricing>(DEFAULT_PRICING);
+  const [itemOrder, setItemOrder] = useState<string[]>([]);
+  const [records, setRecords] = useState<SaleRecord[]>([]);
+  const [customFields, setCustomFields] = useState<CustomField[]>([]);
+
+  // --- Sync State ---
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncSettings, setSyncSettings] = useState<{ enabled: boolean, spreadsheetId: string | null }>({ enabled: false, spreadsheetId: null });
 
   const [showConfig, setShowConfig] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -156,6 +241,7 @@ export default function App() {
   const [discountAmount, setDiscountAmount] = useState<string>('');
   const [cart, setCart] = useState<CartItem[]>([]);
   const [showConfirmation, setShowConfirmation] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   
   // --- Filter State ---
   const [searchQuery, setSearchQuery] = useState('');
@@ -184,25 +270,152 @@ export default function App() {
 
   // --- Effects ---
   useEffect(() => {
-    const savedUser = localStorage.getItem('uniform_user');
-    if (savedUser) {
-      setUser(JSON.parse(savedUser));
+    const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
+      if (fbUser) {
+        // Fetch user metadata from Firestore
+        try {
+          // Attempt to get user doc, if it fails with offline, we handle it
+          const userDoc = await getDoc(doc(db, 'users', fbUser.uid)).catch(err => {
+             if (err?.message?.includes('offline') || err?.message?.includes('reach Cloud Firestore')) {
+                setIsOffline(true);
+                throw err;
+             }
+             return getDoc(doc(db, 'users', fbUser.uid)); // Retry once
+          });
+
+          let userData: User;
+          
+          if (userDoc.exists()) {
+            userData = userDoc.data() as User;
+            userData.emailVerified = fbUser.emailVerified;
+            // Force admin role for the designated emails
+            const adminEmails = ['vishal@unicrm.in', 'vishaldalamwala@gmail.com', 'ruhilvishal123@gmail.com'];
+            if (fbUser.email && adminEmails.includes(fbUser.email) && userData.role !== 'Admin') {
+                userData.role = 'Admin';
+                try {
+                  await setDoc(doc(db, 'users', fbUser.uid), userData, { merge: true });
+                } catch (e) {
+                  console.warn("Self-promotion failed, may lack rules permission yet", e);
+                }
+            }
+          } else {
+            // Handle case where user is in Auth but not in Firestore
+            const adminEmails = ['vishal@unicrm.in', 'vishaldalamwala@gmail.com', 'ruhilvishal123@gmail.com'];
+            userData = {
+              id: fbUser.uid,
+              email: fbUser.email || '',
+              name: fbUser.displayName || fbUser.email?.split('@')[0] || 'User',
+              role: fbUser.email && adminEmails.includes(fbUser.email) ? 'Admin' : 'Viewer',
+              createdAt: new Date().toISOString(),
+              emailVerified: fbUser.emailVerified
+            };
+            try {
+              await setDoc(doc(db, 'users', fbUser.uid), userData);
+            } catch (e) {
+              console.error("Failed to create user profile", e);
+              if (e instanceof Error && (e.message.includes('offline') || e.message.includes('reach Cloud Firestore'))) {
+                setIsOffline(true);
+              }
+            }
+          }
+          setUser(userData);
+          setIsOffline(false);
+        } catch (error: any) {
+          if (error?.message?.includes('offline') || error?.message?.includes('reach Cloud Firestore')) {
+            setIsOffline(true);
+          } else {
+            handleFirestoreError(error, OperationType.GET, `users/${fbUser.uid}`);
+          }
+        }
+      } else {
+        setUser(null);
+      }
+      setAuthLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, [retryCount]);
+
+  // Firestore Sync
+  useEffect(() => {
+    if (!user) return;
+
+    // Sync Pricing
+    const unsubPricing = onSnapshot(doc(db, 'pricing', 'current'), (snapshot) => {
+      if (snapshot.exists()) {
+        const pData = snapshot.data();
+        setPricing(pData.data);
+        if (pData.order && Array.isArray(pData.order)) {
+          setItemOrder(pData.order);
+        } else {
+          setItemOrder(Object.keys(pData.data));
+        }
+      } else if (user && user.role === 'Admin') {
+        // Initialize pricing if missing
+        setDoc(doc(db, 'pricing', 'current'), { 
+          data: DEFAULT_PRICING,
+          order: Object.keys(DEFAULT_PRICING)
+        }).catch(err => {
+           console.error("Failed to init pricing", err);
+        });
+      }
+    }, (error) => handleFirestoreError(error, OperationType.GET, 'pricing/current'));
+
+    // Sync Records
+    const qSales = query(collection(db, 'sales'), orderBy('timestamp', 'desc'));
+    const unsubSales = onSnapshot(qSales, (snapshot) => {
+      const docs = snapshot.docs.map(d => ({ ...d.data(), id: d.id } as SaleRecord));
+      setRecords(docs);
+    }, (error) => handleFirestoreError(error, OperationType.GET, 'sales'));
+
+    // Sync Custom Fields
+    const unsubFields = onSnapshot(doc(db, 'settings', 'customFields'), (snapshot) => {
+      if (snapshot.exists()) {
+        setCustomFields(snapshot.data().fields || []);
+      }
+    }, (error) => handleFirestoreError(error, OperationType.GET, 'settings/customFields'));
+
+    // Sync Users (Admin only)
+    let unsubUsers: any = () => {};
+    if (user.role === 'Admin') {
+      unsubUsers = onSnapshot(collection(db, 'users'), (snapshot) => {
+        const docs = snapshot.docs.map(d => d.data() as User);
+        setUsers(docs);
+      });
     }
-    setAuthLoading(false);
-  }, []);
 
-  // Save changes to localStorage
-  useEffect(() => {
-    localStorage.setItem('uniform_pricing', JSON.stringify(pricing));
-  }, [pricing]);
+    return () => {
+      unsubPricing();
+      unsubSales();
+      unsubFields();
+      unsubUsers();
+    };
+  }, [user]);
 
-  useEffect(() => {
-    localStorage.setItem('uniform_records', JSON.stringify(records));
-  }, [records]);
+  // Save changes to Firestore
+  const updatePricingInCloud = async (newPricing: Pricing, newOrder?: string[]) => {
+    try {
+      await setDoc(doc(db, 'pricing', 'current'), { 
+        data: newPricing,
+        order: newOrder || itemOrder
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'pricing/current');
+    }
+  };
 
-  useEffect(() => {
-    localStorage.setItem('uniform_custom_fields', JSON.stringify(customFields));
-  }, [customFields]);
+  const updateItemOrder = (newOrder: string[]) => {
+    setItemOrder(newOrder);
+    updatePricingInCloud(pricing, newOrder);
+  };
+
+  const updateFieldsInCloud = async (newFields: CustomField[]) => {
+    try {
+      await setDoc(doc(db, 'settings', 'customFields'), { fields: newFields });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'settings/customFields');
+    }
+  };
 
   // Handle auto-increment for Sr. No.
   useEffect(() => {
@@ -340,66 +553,161 @@ export default function App() {
     setLoginLoading(true);
     setLoginError(null);
     
-    // Simulate network delay
-    await new Promise(resolve => setTimeout(resolve, 800));
+    try {
+      if (isSignUp) {
+        const { createUserWithEmailAndPassword, updateProfile } = await import('firebase/auth');
+        const cred = await createUserWithEmailAndPassword(auth, email, password);
+        await updateProfile(cred.user, { displayName: name || email.split('@')[0] });
+        
+        // Send verification email
+        await sendEmailVerification(cred.user);
+        
+        // Create user record in Firestore
+        await setDoc(doc(db, 'users', cred.user.uid), {
+          id: cred.user.uid,
+          email: cred.user.email,
+          name: name || email.split('@')[0],
+          role: 'Viewer',
+          createdAt: new Date().toISOString()
+        });
 
-    const foundUser = users.find(u => u.email === email && u.password === password);
-    if (foundUser) {
-      setUser(foundUser);
-      localStorage.setItem('uniform_user', JSON.stringify(foundUser));
-    } else {
-      setLoginError("Invalid email or password. Please use correct credentials.");
+        setMsg({ type: 'success', text: 'Account created! A verification email has been sent to your inbox.' });
+        setTimeout(() => setMsg(null), 5000);
+      } else {
+        await signInWithEmailAndPassword(auth, email, password);
+      }
+    } catch (error: any) {
+      console.error("Auth error", error);
+      if (error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password' || error.code === 'auth/invalid-credential') {
+        setLoginError("Invalid email or password. Please check your credentials.");
+      } else if (error.code === 'auth/email-already-in-use') {
+        setLoginError("This email is already registered. Please sign in instead.");
+      } else if (error.code === 'auth/popup-closed-by-user') {
+        setLoginError("Login cancelled.");
+      } else {
+        setLoginError(error.message || "An unexpected error occurred.");
+      }
     }
     setLoginLoading(false);
   };
 
-  const logout = () => {
-    setUser(null);
-    localStorage.removeItem('uniform_user');
-    setActiveTab('dashboard');
+  const resendVerification = async () => {
+    if (!auth.currentUser) return;
+    try {
+      await sendEmailVerification(auth.currentUser);
+      setMsg({ type: 'success', text: 'Verification email sent!' });
+      setTimeout(() => setMsg(null), 3000);
+    } catch (err: any) {
+      setMsg({ type: 'error', text: err.message || 'Failed to send verification email.' });
+      setTimeout(() => setMsg(null), 3000);
+    }
+  };
+
+  const signInWithGoogle = async () => {
+    setLoginLoading(true);
+    setLoginError(null);
+    try {
+      const provider = new GoogleAuthProvider();
+      const result = await signInWithPopup(auth, provider);
+      
+      // Check if user exists in Firestore, if not create record
+      const userDoc = await getDoc(doc(db, 'users', result.user.uid));
+      if (!userDoc.exists()) {
+        await setDoc(doc(db, 'users', result.user.uid), {
+          id: result.user.uid,
+          email: result.user.email,
+          name: result.user.displayName || result.user.email?.split('@')[0] || 'Unknown User',
+          photoURL: result.user.photoURL || null,
+          role: 'Viewer', // Default role
+          createdAt: new Date().toISOString()
+        });
+      }
+    } catch (error: any) {
+      console.error("Google Auth error", error);
+      if (error.code !== 'auth/popup-closed-by-user') {
+        setLoginError("Failed to sign in with Google. Please try again.");
+      }
+    }
+    setLoginLoading(false);
+  };
+
+  const handleResetPassword = async () => {
+    if (!email) {
+      setLoginError("Please enter your email address first.");
+      return;
+    }
+    setLoginLoading(true);
+    try {
+      await sendPasswordResetEmail(auth, email);
+      setMsg({ type: 'success', text: 'Password reset link sent to your email.' });
+      setTimeout(() => setMsg(null), 5000);
+    } catch (error: any) {
+      setLoginError(error.message || "Failed to send reset email.");
+    }
+    setLoginLoading(false);
+  };
+
+  const logout = async () => {
+    try {
+      await signOut(auth);
+      setPricing(DEFAULT_PRICING);
+      setRecords([]);
+      setCustomFields([]);
+      setActiveTab('dashboard');
+    } catch (error) {
+      console.error("Logout error", error);
+    }
   };
 
   const handlePriceChange = (item: string, size: string, value: number) => {
-    setPricing(prev => ({
-      ...prev,
+    const next = {
+      ...pricing,
       [item]: {
-        ...prev[item],
-        [size]: { ...prev[item][size], price: value }
+        ...pricing[item],
+        [size]: { ...pricing[item][size], price: value }
       }
-    }));
+    };
+    setPricing(next);
+    updatePricingInCloud(next);
   };
 
   const handleStockChange = (item: string, size: string, value: number) => {
-    setPricing(prev => ({
-      ...prev,
+    const next = {
+      ...pricing,
       [item]: {
-        ...prev[item],
-        [size]: { ...prev[item][size], stock: value }
+        ...pricing[item],
+        [size]: { ...pricing[item][size], stock: value }
       }
-    }));
+    };
+    setPricing(next);
+    updatePricingInCloud(next);
   };
 
   const handleMinStockChange = (item: string, size: string, value: number) => {
-    setPricing(prev => ({
-      ...prev,
+    const next = {
+      ...pricing,
       [item]: {
-        ...prev[item],
-        [size]: { ...prev[item][size], minStock: value }
+        ...pricing[item],
+        [size]: { ...pricing[item][size], minStock: value }
       }
-    }));
+    };
+    setPricing(next);
+    updatePricingInCloud(next);
   };
 
   const renameItem = (oldName: string, newName: string) => {
     const cleanName = newName.trim();
     if (!cleanName || cleanName === oldName || pricing[cleanName]) return;
     
-    setPricing(prev => {
-      const next = { ...prev };
-      const sizes = next[oldName];
-      next[cleanName] = sizes;
-      delete next[oldName];
-      return next;
-    });
+    const next = { ...pricing };
+    const sizes = next[oldName];
+    next[cleanName] = sizes;
+    delete next[oldName];
+
+    const nextOrder = itemOrder.map(it => it === oldName ? cleanName : it);
+    setItemOrder(nextOrder);
+    setPricing(next);
+    updatePricingInCloud(next, nextOrder);
 
     if (newItem.item === oldName) {
       setNewItem(p => ({ ...p, item: cleanName }));
@@ -410,15 +718,14 @@ export default function App() {
     const cleanSize = newSize.trim();
     if (!cleanSize || cleanSize === oldSize || pricing[item][cleanSize]) return;
     
-    setPricing(prev => {
-      const next = { ...prev };
-      const itemSizes = { ...next[item] };
-      const price = itemSizes[oldSize];
-      delete itemSizes[oldSize];
-      itemSizes[cleanSize] = price;
-      next[item] = itemSizes;
-      return next;
-    });
+    const next = { ...pricing };
+    const itemSizes = { ...next[item] };
+    const price = itemSizes[oldSize];
+    delete itemSizes[oldSize];
+    itemSizes[cleanSize] = price;
+    next[item] = itemSizes;
+    setPricing(next);
+    updatePricingInCloud(next);
   };
 
   const addNewItem = (e: React.FormEvent<HTMLFormElement>) => {
@@ -427,10 +734,14 @@ export default function App() {
     const itemName = (formData.get('itemName') as string).trim();
     if (!itemName || pricing[itemName]) return;
     
-    setPricing(prev => ({
-      ...prev,
+    const next = {
+      ...pricing,
       [itemName]: {}
-    }));
+    };
+    const nextOrder = [...itemOrder, itemName];
+    setItemOrder(nextOrder);
+    setPricing(next);
+    updatePricingInCloud(next, nextOrder);
     (e.target as HTMLFormElement).reset();
   };
 
@@ -440,20 +751,19 @@ export default function App() {
       title: 'Delete Category',
       message: `Are you sure you want to delete "${item}"? This will remove all associated sizes and pricing configurations.`,
       onConfirm: () => {
-        setPricing(prev => {
-          const next = { ...prev };
-          delete next[item];
-          return next;
-        });
+        const next = { ...pricing };
+        delete next[item];
+        const nextOrder = itemOrder.filter(it => it !== item);
+        setItemOrder(nextOrder);
+        setPricing(next);
+        updatePricingInCloud(next, nextOrder);
 
         if (newItem.item === item) {
-          const nextPricing = { ...pricing };
-          delete nextPricing[item];
-          const firstAvailable = Object.keys(nextPricing)[0];
+          const firstAvailable = Object.keys(next)[0];
           setNewItem(p => ({
             ...p,
             item: firstAvailable || '',
-            size: firstAvailable ? Object.keys(nextPricing[firstAvailable])[0] || '' : ''
+            size: firstAvailable ? Object.keys(next[firstAvailable])[0] || '' : ''
           }));
         }
       },
@@ -469,23 +779,27 @@ export default function App() {
     
     if (!size) return;
 
-    setPricing(prev => ({
-      ...prev,
+    const next = {
+      ...pricing,
       [item]: {
-        ...prev[item],
+        ...pricing[item],
         [size]: { price, stock: 0, minStock: 5 }
       }
-    }));
+    };
+    setPricing(next);
+    updatePricingInCloud(next);
     (e.target as HTMLFormElement).reset();
   };
 
   const deleteSize = (item: string, size: string) => {
-    setPricing(prev => ({
-      ...prev,
-      [item]: Object.fromEntries(
-        Object.entries(prev[item]).filter(([s]) => s !== size)
-      )
-    }));
+    const nextSizes = { ...pricing[item] };
+    delete nextSizes[size];
+    const next = {
+        ...pricing,
+        [item]: nextSizes
+    };
+    setPricing(next);
+    updatePricingInCloud(next);
   };
 
   const exportPricing = () => {
@@ -507,6 +821,7 @@ export default function App() {
         const importedPricing = JSON.parse(event.target?.result as string);
         if (typeof importedPricing === 'object' && importedPricing !== null) {
           setPricing(importedPricing);
+          updatePricingInCloud(importedPricing);
           setMsg({ text: 'Pricing chart imported successfully!', type: 'success' });
           setTimeout(() => setMsg(null), 3000);
         } else {
@@ -521,6 +836,120 @@ export default function App() {
     e.target.value = '';
   };
 
+  const exportPricingExcel = () => {
+    const rows: any[] = [];
+    Object.entries(pricing).forEach(([item, sizes]: [string, any]) => {
+      Object.entries(sizes).forEach(([size, info]: [string, any]) => {
+        rows.push({
+          "Item": item,
+          "Size": size,
+          "Price": info.price,
+          "Stock": info.stock || 0,
+          "Min Stock": info.minStock || 0
+        });
+      });
+    });
+
+    const worksheet = XLSX.utils.json_to_sheet(rows);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Pricing_Inventory");
+    XLSX.writeFile(workbook, `Pricing_Inventory_${new Date().toISOString().split('T')[0]}.xlsx`);
+    setMsg({ text: 'Price & Inventory list exported as Excel.', type: 'success' });
+    setTimeout(() => setMsg(null), 3000);
+  };
+
+  const [importResult, setImportResult] = useState<{
+    successCount: number;
+    errors: { row: number; item: string; size: string; reason: string }[];
+  } | null>(null);
+
+  const importPricingExcel = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const bstr = evt.target?.result;
+        const workbook = XLSX.read(bstr, { type: 'binary' });
+        const sheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[sheetName];
+        const data = XLSX.utils.sheet_to_json(worksheet) as any[];
+
+        const nextPricing: any = { ...pricing };
+        const errors: { row: number; item: string; size: string; reason: string }[] = [];
+        let successCount = 0;
+
+        data.forEach((row: any, index: number) => {
+          const item = row["Item"];
+          const size = String(row["Size"] || "");
+          const priceRaw = row["Price"];
+          const stockRaw = row["Stock"];
+          const minStockRaw = row["Min Stock"];
+          
+          const rowNum = index + 2; // +1 for 0-indexed, +1 for header row
+
+          if (!item) {
+            errors.push({ row: rowNum, item: "N/A", size: size || "N/A", reason: "Missing Item name" });
+            return;
+          }
+          if (!size) {
+            errors.push({ row: rowNum, item: item, size: "N/A", reason: "Missing Size" });
+            return;
+          }
+
+          const price = Number(priceRaw);
+          const stock = Number(stockRaw);
+          const minStock = Number(minStockRaw);
+
+          let hasError = false;
+          if (priceRaw !== undefined && isNaN(price)) {
+            errors.push({ row: rowNum, item, size, reason: `Invalid Price: ${priceRaw}` });
+            hasError = true;
+          }
+          if (stockRaw !== undefined && isNaN(stock)) {
+            errors.push({ row: rowNum, item, size, reason: `Invalid Stock: ${stockRaw}` });
+            hasError = true;
+          }
+          if (minStockRaw !== undefined && isNaN(minStock)) {
+            errors.push({ row: rowNum, item, size, reason: `Invalid Min Stock: ${minStockRaw}` });
+            hasError = true;
+          }
+
+          if (!hasError) {
+            if (!nextPricing[item]) nextPricing[item] = {};
+            nextPricing[item][size] = {
+              price: isNaN(price) ? (nextPricing[item][size]?.price || 0) : price,
+              stock: isNaN(stock) ? (nextPricing[item][size]?.stock || 0) : stock,
+              minStock: isNaN(minStock) ? (nextPricing[item][size]?.minStock || 0) : minStock
+            };
+            successCount++;
+          }
+        });
+
+        if (successCount > 0) {
+          setPricing(nextPricing);
+          updatePricingInCloud(nextPricing);
+        }
+
+        if (errors.length > 0) {
+          setImportResult({ successCount, errors });
+          setMsg({ text: `Import completed with ${errors.length} errors.`, type: 'error' });
+        } else {
+          setImportResult(null);
+          setMsg({ text: `Successfully imported ${successCount} items!`, type: 'success' });
+        }
+        setTimeout(() => setMsg(null), 5000);
+      } catch (err) {
+        console.error("Import error:", err);
+        setMsg({ text: 'Failed to import Excel. Invalid format.', type: 'error' });
+        setTimeout(() => setMsg(null), 3000);
+      }
+    };
+    reader.readAsBinaryString(file);
+    e.target.value = '';
+  };
+
   const addCustomField = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
@@ -531,28 +960,37 @@ export default function App() {
     if (!label) return;
 
     if (customFields.some(f => f.label.toLowerCase() === label.toLowerCase())) {
-        alert("A field with this name already exists.");
+        setMsg({ type: 'error', text: "A field with this name already exists." });
+        setTimeout(() => setMsg(null), 3000);
         return;
     }
 
-    setCustomFields(prev => [
-      ...prev,
-      { id: crypto.randomUUID(), label, type, required }
-    ]);
+    const next = [
+        ...customFields,
+        { id: crypto.randomUUID(), label, type, required }
+    ];
+    setCustomFields(next);
+    updateFieldsInCloud(next);
     (e.target as HTMLFormElement).reset();
   };
 
   const removeCustomField = (id: string) => {
-    setCustomFields(prev => prev.filter(f => f.id !== id));
+    const next = customFields.filter(f => f.id !== id);
+    setCustomFields(next);
+    updateFieldsInCloud(next);
     setCustomValues(prev => {
-      const next = { ...prev };
-      delete next[id];
-      return next;
+      const remaining: Record<string, string> = {};
+      Object.entries(prev).forEach(([key, val]) => {
+          if (key !== id) remaining[key] = val as string;
+      });
+      return remaining;
     });
   };
 
   const updateCustomField = (id: string, updates: Partial<CustomField>) => {
-    setCustomFields(prev => prev.map(f => f.id === id ? { ...f, ...updates } : f));
+    const next = customFields.map(f => f.id === id ? { ...f, ...updates } : f);
+    setCustomFields(next);
+    updateFieldsInCloud(next);
   };
 
   const addToCart = (e: React.MouseEvent | React.FormEvent) => {
@@ -563,13 +1001,6 @@ export default function App() {
     if (!studentName.trim()) {
         setFormError("Student name is required.");
         return;
-    }
-
-    // Validate required custom fields
-    const missing = customFields.find(f => f.required && !customValues[f.id]);
-    if (missing) {
-      setFormError(`"${missing.label}" is required.`);
-      return;
     }
 
     const item: CartItem = {
@@ -585,16 +1016,117 @@ export default function App() {
     }
     setCart(prev => [...prev, item]);
     setNewItem(prev => ({ ...prev, qty: 1, notes: '' }));
-    setCustomValues({});
   };
 
   const removeFromCart = (id: string) => {
     setCart(prev => prev.filter(item => item.id !== id));
   };
 
-  const submitTransaction = () => {
-    if (!studentName.trim() || cart.length === 0) return;
+  // --- Sync Effects ---
+  useEffect(() => {
+    const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID || (firebaseConfig as any).oauthClientId;
+    if (clientId) {
+      initGsi(clientId);
+    }
+  }, []);
 
+  useEffect(() => {
+    if (!user) return;
+    const unsubSync = onSnapshot(doc(db, 'settings', 'sync'), (snapshot) => {
+      if (snapshot.exists()) {
+        setSyncSettings(snapshot.data() as any);
+      }
+    });
+    return () => unsubSync();
+  }, [user]);
+
+  const performSheetSync = async (action: 'create' | 'update' | 'delete', recordId: string, record?: SaleRecord) => {
+    if (!syncSettings.enabled || !syncSettings.spreadsheetId) return;
+    
+    try {
+      const token = await getAccessToken(false).catch(() => getAccessToken(true));
+      const itemNames = Object.keys(pricing);
+
+      if (action === 'create' || action === 'update') {
+        const rec = record || records.find(r => r.id === recordId);
+        if (!rec) return;
+        const row = sheetService.recordToRow(rec, itemNames, customFields);
+        if (action === 'create') {
+          await sheetService.appendRecords(token, syncSettings.spreadsheetId, [row]);
+        } else {
+          await sheetService.updateRecordInSheet(token, syncSettings.spreadsheetId, recordId, row);
+        }
+      } else if (action === 'delete') {
+        await sheetService.deleteRecordInSheet(token, syncSettings.spreadsheetId, recordId);
+      }
+    } catch (err) {
+      console.error('Sheet Sync Error:', err);
+      setMsg({ type: 'error', text: 'Google Sheet Sync failed. Check authentication.' });
+      setTimeout(() => setMsg(null), 5000);
+    }
+  };
+
+  const setupGoogleSheet = async () => {
+    setIsSyncing(true);
+    try {
+      const token = await getAccessToken(true);
+      const spreadsheetId = await sheetService.createSpreadsheet(token, `Uniform Sales Ledger - ${new Date().toLocaleDateString()}`);
+      
+      const itemNames = Object.keys(pricing);
+      const headers = sheetService.prepareHeaders(itemNames, customFields);
+      await sheetService.setupSheetHeaders(token, spreadsheetId, headers);
+
+      // Initial Sync
+      const rows = records.map(r => sheetService.recordToRow(r, itemNames, customFields));
+      if (rows.length > 0) {
+        await sheetService.appendRecords(token, spreadsheetId, rows);
+      }
+
+      await setDoc(doc(db, 'settings', 'sync'), { enabled: true, spreadsheetId });
+      setMsg({ type: 'success', text: 'Google Sheet connected and synchronized.' });
+    } catch (err: any) {
+      console.error('Setup Sheet Error:', err);
+      setMsg({ type: 'error', text: `Failed to setup sheet: ${err.message}` });
+    } finally {
+      setIsSyncing(false);
+      setTimeout(() => setMsg(null), 5000);
+    }
+  };
+
+  const toggleSync = async (enabled: boolean) => {
+    await updateDoc(doc(db, 'settings', 'sync'), { enabled });
+  };
+
+  const manualFullSync = async () => {
+    if (!syncSettings.spreadsheetId) return;
+    setIsSyncing(true);
+    try {
+      const token = await getAccessToken(true);
+      await sheetService.clearSheet(token, syncSettings.spreadsheetId);
+      
+      const itemNames = Object.keys(pricing);
+      const headers = sheetService.prepareHeaders(itemNames, customFields);
+      await sheetService.setupSheetHeaders(token, syncSettings.spreadsheetId, headers);
+
+      const rows = records.map(r => sheetService.recordToRow(r, itemNames, customFields));
+      if (rows.length > 0) {
+        await sheetService.appendRecords(token, syncSettings.spreadsheetId, rows);
+      }
+      setMsg({ type: 'success', text: 'Full synchronization complete.' });
+    } catch (err: any) {
+      console.error('Manual Sync Error:', err);
+      setMsg({ type: 'error', text: `Failed manual sync: ${err.message}` });
+    } finally {
+      setIsSyncing(false);
+      setTimeout(() => setMsg(null), 5000);
+    }
+  };
+
+  const submitTransaction = async () => {
+    const isCustomFieldsValid = customFields.every((f: any) => !f.required || (customValues[f.id] && String(customValues[f.id]).trim() !== ''));
+    if (!studentName.trim() || cart.length === 0 || !isCustomFieldsValid || isSubmitting) return;
+
+    setIsSubmitting(true);
     const timestamp = new Date().toISOString();
     const displayDate = new Date(transactionDate).toLocaleDateString('en-IN');
 
@@ -621,47 +1153,128 @@ export default function App() {
       newRecord.notes = generalNotes.trim();
     }
 
-    setRecords(prev => [newRecord, ...prev]);
-    
-    // Deduct stock
-    setPricing(prev => {
-      const next = { ...prev };
+    try {
+      // Add to Firestore
+      await addDoc(collection(db, 'sales'), newRecord);
+      
+      // Update Stock in Firestore via transaction or batch
+      const batch = writeBatch(db);
+      const nextPricing = { ...pricing };
       cart.forEach(item => {
-        if (next[item.item] && next[item.item][item.size]) {
-          next[item.item][item.size] = {
-            ...next[item.item][item.size],
-            stock: next[item.item][item.size].stock - item.qty
+        if (nextPricing[item.item] && nextPricing[item.item][item.size]) {
+          nextPricing[item.item][item.size] = {
+            ...nextPricing[item.item][item.size],
+            stock: nextPricing[item.item][item.size].stock - item.qty
           };
         }
       });
-      return next;
-    });
+      batch.set(doc(db, 'pricing', 'current'), { data: nextPricing });
+      await batch.commit();
 
-    setSrNo(prev => prev + 1);
-    setCart([]);
-    setStudentName('');
-    setStudentClass(CLASSES[0]);
-    setGeneralNotes('');
-    setCustomValues({});
-    setDiscountAmount('');
-    setPaymentMode('Pending');
-    setPaidAmount('');
-    setShowConfirmation(false);
+      // Sync to Sheet
+      performSheetSync('create', newRecord.id, newRecord);
+
+      setSrNo(prev => prev + 1);
+      setCart([]);
+      setStudentName('');
+      setStudentClass(CLASSES[0]);
+      setGeneralNotes('');
+      setCustomValues({});
+      setDiscountAmount('');
+      setPaymentMode('Pending');
+      setPaidAmount('');
+      setShowConfirmation(false);
+      setMsg({ type: 'success', text: 'Transaction recorded successfully.' });
+      setTimeout(() => setMsg(null), 3000);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'sales');
+      setMsg({ type: 'error', text: 'Failed to record transaction. Please try again.' });
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const deleteRecord = (id: string) => {
+    const rec = records.find(r => r.id === id);
     setConfirmState({
       isOpen: true,
       title: 'Delete Record',
       message: 'Are you sure you want to permanently delete this transaction record? This action cannot be undone.',
-      onConfirm: () => setRecords(prev => prev.filter(r => r.id !== id)),
+      onConfirm: async () => {
+        try {
+          const batch = writeBatch(db);
+          batch.delete(doc(db, 'sales', id));
+          
+          // Revert Stock
+          if (rec && rec.items && rec.items.length > 0) {
+            const nextPricing = { ...pricing };
+            rec.items.forEach(item => {
+              if (nextPricing[item.item] && nextPricing[item.item][item.size]) {
+                nextPricing[item.item][item.size] = {
+                  ...nextPricing[item.item][item.size],
+                  stock: nextPricing[item.item][item.size].stock + item.qty
+                };
+              }
+            });
+            batch.set(doc(db, 'pricing', 'current'), { data: nextPricing });
+          }
+          
+          await batch.commit();
+          performSheetSync('delete', id);
+          setMsg({ type: 'success', text: 'Record deleted.' });
+          setTimeout(() => setMsg(null), 3000);
+        } catch (error) {
+          handleFirestoreError(error, OperationType.DELETE, `sales/${id}`);
+        }
+      },
       type: 'danger'
     });
   };
 
-  const updateRecord = (id: string, updates: any) => {
-    setRecords(prev => prev.map(r => r.id === id ? { ...r, ...updates } : r));
-    setEditingRecord(null);
+  const updateRecord = async (id: string, updates: any) => {
+    try {
+      const oldRec = records.find(r => r.id === id);
+      const batch = writeBatch(db);
+      
+      // If items changed, adjust stock
+      if (updates.items && oldRec) {
+        const nextPricing = { ...pricing };
+        
+        // 1. Add back old items to stock
+        oldRec.items.forEach(item => {
+          if (nextPricing[item.item] && nextPricing[item.item][item.size]) {
+            nextPricing[item.item][item.size] = {
+              ...nextPricing[item.item][item.size],
+              stock: nextPricing[item.item][item.size].stock + item.qty
+            };
+          }
+        });
+        
+        // 2. Subtract new items from stock
+        updates.items.forEach((item: CartItem) => {
+          if (nextPricing[item.item] && nextPricing[item.item][item.size]) {
+            nextPricing[item.item][item.size] = {
+              ...nextPricing[item.item][item.size],
+              stock: nextPricing[item.item][item.size].stock - item.qty
+            };
+          }
+        });
+        
+        batch.set(doc(db, 'pricing', 'current'), { data: nextPricing });
+      }
+      
+      batch.update(doc(db, 'sales', id), updates);
+      await batch.commit();
+
+      if (oldRec) {
+        performSheetSync('update', id, { ...oldRec, ...updates });
+      }
+      setEditingRecord(null);
+      setMsg({ type: 'success', text: 'Record updated.' });
+      setTimeout(() => setMsg(null), 3000);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `sales/${id}`);
+    }
   };
 
   const bulkDeleteRecords = (ids: string[]) => {
@@ -669,9 +1282,41 @@ export default function App() {
       isOpen: true,
       title: 'Bulk Delete',
       message: `Are you sure you want to delete ${ids.length} selected records? This action is permanent.`,
-      onConfirm: () => {
-        setRecords(prev => prev.filter(r => !ids.includes(r.id)));
-        setSelectedRecordIds([]);
+      onConfirm: async () => {
+        try {
+          const batch = writeBatch(db);
+          const nextPricing = { ...pricing };
+          let stockChanged = false;
+
+          ids.forEach(id => {
+            const rec = records.find(r => r.id === id);
+            batch.delete(doc(db, 'sales', id));
+            
+            if (rec && rec.items && rec.items.length > 0) {
+              stockChanged = true;
+              rec.items.forEach(item => {
+                if (nextPricing[item.item] && nextPricing[item.item][item.size]) {
+                  nextPricing[item.item][item.size] = {
+                    ...nextPricing[item.item][item.size],
+                    stock: nextPricing[item.item][item.size].stock + item.qty
+                  };
+                }
+              });
+            }
+            performSheetSync('delete', id);
+          });
+
+          if (stockChanged) {
+            batch.set(doc(db, 'pricing', 'current'), { data: nextPricing });
+          }
+
+          await batch.commit();
+          setSelectedRecordIds([]);
+          setMsg({ type: 'success', text: `${ids.length} records deleted.` });
+          setTimeout(() => setMsg(null), 3000);
+        } catch (error) {
+          handleFirestoreError(error, OperationType.DELETE, 'sales (bulk)');
+        }
       },
       type: 'danger'
     });
@@ -681,27 +1326,44 @@ export default function App() {
     const timestamp = new Date().toISOString();
     const pDate = new Date().toISOString().split('T')[0];
     
-    setRecords(prev => prev.map(r => {
-      if (ids.includes(r.id)) {
-        const updates: any = {
-          paymentMode: mode,
-          updatedAt: timestamp
-        };
-        
-        if (mode !== 'Pending') {
-          if (r.paymentMode === 'Pending') {
-            updates.paidAmount = r.totalAmount;
-            updates.paymentDate = pDate;
-          }
-        } else {
-          updates.paidAmount = null;
-          updates.paymentDate = null;
-        }
-        return { ...r, ...updates };
-      }
-      return r;
-    }));
-    setSelectedRecordIds([]);
+    setConfirmState({
+        isOpen: true,
+        title: 'Bulk Update Status',
+        message: `Update ${ids.length} records to ${mode}?`,
+        onConfirm: async () => {
+            try {
+                const batch = writeBatch(db);
+                ids.forEach(id => {
+                    const r = records.find(record => record.id === id);
+                    if (r) {
+                        const updates: any = {
+                            paymentMode: mode,
+                            updatedAt: timestamp
+                        };
+                        
+                        if (mode !== 'Pending') {
+                            if (r.paymentMode === 'Pending') {
+                                updates.paidAmount = r.totalAmount;
+                                updates.paymentDate = pDate;
+                            }
+                        } else {
+                            updates.paidAmount = null;
+                            updates.paymentDate = null;
+                        }
+                        batch.update(doc(db, 'sales', id), updates);
+                        performSheetSync('update', id, { ...r, ...updates });
+                    }
+                });
+                await batch.commit();
+                setSelectedRecordIds([]);
+                setMsg({ type: 'success', text: 'Status updated.' });
+                setTimeout(() => setMsg(null), 3000);
+            } catch (error) {
+                handleFirestoreError(error, OperationType.UPDATE, 'sales (bulk status)');
+            }
+        },
+        type: 'info'
+    });
   };
 
   const clearRecords = () => {
@@ -709,88 +1371,163 @@ export default function App() {
       isOpen: true,
       title: 'Clear Ledger',
       message: 'Are you sure you want to permanently delete all sales history? This action cannot be undone.',
-      onConfirm: () => {
-        setRecords([]);
-        setSelectedRecordIds([]);
+      onConfirm: async () => {
+        try {
+          const batch = writeBatch(db);
+          records.forEach(r => {
+            batch.delete(doc(db, 'sales', r.id));
+            performSheetSync('delete', r.id);
+          });
+          await batch.commit();
+          setSelectedRecordIds([]);
+        } catch (error) {
+          handleFirestoreError(error, OperationType.DELETE, 'sales (clear all)');
+        }
       },
       type: 'danger'
     });
   };
 
-  const exportCSV = () => {
-    if (filteredRecords.length === 0) return;
-    
+  const exportLedger = (format: 'xlsx' | 'csv') => {
+    if (filteredRecords.length === 0) {
+      setMsg({ type: 'error', text: 'No records to export' });
+      return;
+    }
+
     const itemNames = Object.keys(pricing);
     
-    // Header Row 1: Fixed fields then item names with empty spacers
-    let row1 = ["Sr. No.", "Date", "Student Name", "Class", "General Notes"];
-    itemNames.forEach(name => {
-      row1.push(name, "", ""); // Colspan 3 for each item
-    });
-    row1.push("Total Qty", "Total Amount", "Discount %", "Payment Mode", "Paid Amount", "Payment Date");
-    
-    // Add custom field labels to row 1
-    customFields.forEach(f => {
-      row1.push(f.label);
-    });
-    
-    // Header Row 2: Sub-headings
-    let row2 = ["", "", "", "", ""];
-    itemNames.forEach(() => {
-      row2.push("Size", "Qty", "Price");
-    });
-    row2.push("", "", "", "", "", "");
-    // Add empty sub-headings for custom fields
-    customFields.forEach(() => {
-      row2.push("");
-    });
-
-    let csv = row1.join(",") + "\n" + row2.join(",") + "\n";
-    
-    filteredRecords.forEach(r => {
+    // Create data rows
+    const dataRows = filteredRecords.map(r => {
       const totalQty = r.items.reduce((s, i) => s + i.qty, 0);
-      
-      let row = [
-        r.srNo,
-        r.date,
-        `"${r.name.replace(/"/g, '""')}"`,
-        `"${r.studentClass}"`,
-        `"${(r.notes || '').replace(/"/g, '""')}"`
-      ];
+      const paidNum = r.paidAmount || 0;
+      const balance = r.totalAmount - paidNum;
 
-      // Fill item columns
+      const row: any = {
+        "Sr. No.": r.srNo,
+        "Date": r.date,
+        "Student Name": r.name,
+        "Class": r.studentClass,
+        "General Notes": r.notes || "",
+      };
+
+      // Add item detailed breakdown
       itemNames.forEach(itemName => {
-        const lineItem = r.items.find(i => i.item === itemName);
-        if (lineItem) {
-          row.push(`"${lineItem.size}"`, lineItem.qty, lineItem.qty * lineItem.rate);
-        } else {
-          row.push("", "", "");
-        }
+        const lineItem = r.items.find((i: any) => i.item === itemName);
+        row[`${itemName}_Size`] = lineItem ? lineItem.size : "";
+        row[`${itemName}_Qty`] = lineItem ? lineItem.qty : 0;
+        row[`${itemName}_Price`] = lineItem ? lineItem.qty * lineItem.rate : 0;
       });
 
-      row.push(
-        totalQty,
-        r.totalAmount,
-        `${r.discountPercent || 0}`,
-        r.paymentMode,
-        r.paidAmount || 0,
-        r.paymentDate || ''
-      );
+      row["Total Qty"] = totalQty;
+      row["Total Amount"] = r.totalAmount;
+      row["Discount %"] = r.discountPercent || 0;
+      row["Payment Mode"] = r.paymentMode;
+      row["Paid Amount"] = paidNum;
+      row["Balance Due"] = balance;
+      row["Payment Date"] = r.paymentDate || "";
 
-      customFields.forEach(f => {
-        const val = r.customData?.[f.id] || '';
-        row.push(`"${String(val).replace(/"/g, '""')}"`);
+      // Add custom fields
+      customFields.forEach((f: any) => {
+        row[f.label] = r.customData?.[f.id] || "";
       });
 
-      csv += row.join(",") + "\n";
+      return row;
     });
 
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = window.URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.setAttribute('href', url);
-    a.setAttribute('download', `Uniform_Sales_Report_${new Date().toLocaleDateString().replace(/\//g, '-')}.csv`);
-    a.click();
+    const worksheet = XLSX.utils.json_to_sheet(dataRows);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Ledger");
+
+    const fileName = `Uniform_Sales_Report_${new Date().toLocaleDateString().replace(/\//g, '-')}.${format}`;
+
+    if (format === 'xlsx') {
+      XLSX.writeFile(workbook, fileName);
+    } else {
+      XLSX.writeFile(workbook, fileName, { bookType: 'csv' });
+    }
+    
+    setMsg({ type: 'success', text: `Ledger exported as ${format.toUpperCase()}` });
+  };
+
+  const importLedger = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const bstr = evt.target?.result;
+        const workbook = XLSX.read(bstr, { type: 'binary' });
+        const sheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[sheetName];
+        const data = XLSX.utils.sheet_to_json(worksheet) as any[];
+
+        const itemNames = Object.keys(pricing);
+        const importedRecords: SaleRecord[] = data.map((row, index) => {
+          // Extract items
+          const items: CartItem[] = [];
+          itemNames.forEach(itemName => {
+            const sizeKey = `${itemName}_Size`;
+            const qtyKey = `${itemName}_Qty`;
+            const priceKey = `${itemName}_Price`;
+            
+            const size = row[sizeKey];
+            const qty = Number(row[qtyKey] || 0);
+            const price = Number(row[priceKey] || 0);
+            
+            if (qty > 0) {
+              let rate = 0;
+              if (qty > 0) rate = price / qty;
+              
+              if (rate === 0 && pricing[itemName] && size && pricing[itemName][size]) {
+                rate = pricing[itemName][size].rate;
+              }
+
+              items.push({
+                id: crypto.randomUUID(),
+                item: itemName,
+                size: String(size || ""),
+                qty,
+                rate
+              });
+            }
+          });
+
+          // Extract custom data
+          const customData: Record<string, any> = {};
+          customFields.forEach((f: any) => {
+            if (row[f.label] !== undefined) {
+              customData[f.id] = row[f.label];
+            }
+          });
+
+          return {
+            id: crypto.randomUUID(),
+            srNo: Number(row["Sr. No."]) || (records.length + index + 1),
+            date: row["Date"] || new Date().toLocaleDateString('en-IN'),
+            timestamp: new Date().toISOString(),
+            name: String(row["Student Name"] || "Unknown"),
+            studentClass: String(row["Class"] || CLASSES[0]),
+            items,
+            totalAmount: Number(row["Total Amount"] || 0),
+            discountPercent: Number(row["Discount %"] || 0),
+            paymentMode: (row["Payment Mode"] as PaymentMode) || 'Pending',
+            paidAmount: row["Paid Amount"] ? Number(row["Paid Amount"]) : null,
+            paymentDate: row["Payment Date"] || null,
+            notes: row["General Notes"] || "",
+            customData
+          };
+        });
+
+        setRecords((prev: SaleRecord[]) => [...prev, ...importedRecords]);
+        setMsg({ type: 'success', text: `${importedRecords.length} records imported successfully` });
+      } catch (err) {
+        console.error("Import error:", err);
+        setMsg({ type: 'error', text: 'Failed to import ledger. Please check file format.' });
+      }
+    };
+    reader.readAsBinaryString(file);
+    e.target.value = ''; // Reset input
   };
 
   const handlePrint = () => {
@@ -804,6 +1541,75 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex flex-col font-sans">
+      <AnimatePresence>
+        {isOffline && (
+          <motion.div 
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            className="bg-red-600 text-white py-3 px-6 flex items-center justify-between sticky top-0 z-[200] overflow-hidden"
+          >
+            <div className="flex items-center gap-3">
+              <CloudLightning className="animate-pulse" size={20} />
+              <p className="text-xs font-bold uppercase tracking-widest">
+                System Offline: Could not reach Cloud Firestore. Retrying connection...
+              </p>
+            </div>
+            <div className="flex items-center gap-4">
+              <button 
+                onClick={triggerRetry}
+                className="bg-white text-red-600 hover:bg-white/90 px-4 py-1.5 rounded-lg text-[10px] font-black uppercase transition-all flex items-center gap-2"
+              >
+                <RefreshCw size={12} className={authLoading ? "animate-spin" : ""} />
+                {authLoading ? "Checking..." : "Try Reconnect"}
+              </button>
+              <button 
+                onClick={() => window.location.reload()}
+                className="bg-white/20 hover:bg-white/30 px-4 py-1.5 rounded-lg text-[10px] font-black uppercase transition-all"
+              >
+                Force Reload
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+      <AnimatePresence>
+        {user && !authLoading && !user.emailVerified && (
+          <motion.div 
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            className="bg-amber-500 text-white py-3 px-6 flex items-center justify-between sticky top-0 z-[190] overflow-hidden border-b border-amber-600/20 shadow-lg"
+          >
+            <div className="flex items-center gap-3">
+              <AlertCircle size={20} className="animate-bounce" />
+              <div>
+                <p className="text-xs font-black uppercase tracking-widest leading-none">
+                  Email Verification Required
+                </p>
+                <p className="text-[10px] font-bold text-amber-100 mt-1 uppercase tracking-tighter">
+                  Check your inbox for a verification link to ensure full account access.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-4">
+              <button 
+                onClick={resendVerification}
+                className="bg-white text-amber-600 hover:bg-amber-50 px-4 py-1.5 rounded-lg text-[10px] font-black uppercase transition-all flex items-center gap-2"
+              >
+                <Mail size={12} />
+                Resend Email
+              </button>
+              <button 
+                onClick={() => window.location.reload()}
+                className="bg-white/20 hover:bg-white/30 px-4 py-1.5 rounded-lg text-[10px] font-black uppercase transition-all"
+              >
+                I've Verified
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
       <ConfirmDialog 
         isOpen={confirmState.isOpen}
         title={confirmState.title}
@@ -812,12 +1618,17 @@ export default function App() {
         onConfirm={confirmState.onConfirm}
         onCancel={() => setConfirmState(p => ({ ...p, isOpen: false }))}
       />
+      
+      <ImportResultModal 
+        result={importResult} 
+        onClose={() => setImportResult(null)} 
+      />
 
       {/* Dashboard Layout */}
       <div className="flex h-screen bg-slate-50 overflow-hidden font-sans">
         {/* Mobile Drawer Overlay */}
         <AnimatePresence>
-          {isMobileMenuOpen && (
+          {user && isMobileMenuOpen && (
             <>
               <motion.div 
                 initial={{ opacity: 0 }}
@@ -846,13 +1657,13 @@ export default function App() {
                   </div>
 
                   {[
-                    { id: 'dashboard', icon: LayoutDashboard, label: 'Overview' },
+                    { id: 'dashboard', icon: LayoutDashboard, label: 'Home' },
                     { id: 'pricing', icon: Database, label: 'Inventory' },
                     { id: 'sales', icon: PlusCircle, label: 'New Sale' },
                     { id: 'ledger', icon: History, label: 'Transactions' },
                     { id: 'reports', icon: BarChart3, label: 'Analytics' },
-                    { id: 'profile', icon: UserCircle, label: 'Personal' },
-                    ...(user?.role === 'Admin' ? [{ id: 'admin', icon: Settings, label: 'Systems' }] : []),
+                    { id: 'profile', icon: UserCircle, label: 'Account' },
+                    ...(user?.role === 'Admin' ? [{ id: 'admin', icon: Settings, label: 'Settings' }] : []),
                   ].map(tab => (
                     <button
                       key={tab.id}
@@ -881,30 +1692,37 @@ export default function App() {
 
         {/* Mobile Bottom Nav */}
         {user && !authLoading && (
-          <div className="fixed bottom-0 left-0 right-0 h-20 bg-white/80 backdrop-blur-xl border-t border-slate-200 z-[90] md:hidden flex items-center justify-around px-6 pb-2">
-             {[
-               { id: 'dashboard', icon: LayoutDashboard },
-               { id: 'sales', icon: PlusCircle },
-               { id: 'ledger', icon: History },
-               { id: 'profile', icon: UserCircle },
-             ].map(tab => (
-               <button 
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id as any)}
-                className={`p-3 rounded-2xl transition-all relative ${activeTab === tab.id ? 'text-blue-600' : 'text-slate-400'}`}
-               >
-                  {activeTab === tab.id && (
-                    <motion.div layoutId="bottomNavIndicator" className="absolute inset-0 bg-blue-50 rounded-2xl -z-10" />
-                  )}
-                  <tab.icon size={22} strokeWidth={activeTab === tab.id ? 2.5 : 2} />
-               </button>
-             ))}
-             <button 
-              onClick={() => setIsMobileMenuOpen(true)}
-              className="p-3 text-slate-400 rounded-2xl"
-             >
-                <Menu size={22} />
-             </button>
+          <div className="fixed bottom-0 left-0 right-0 py-2 bg-white/95 backdrop-blur-xl border-t border-slate-200 z-[90] md:hidden shadow-[0_-10px_30px_rgba(0,0,0,0.05)]">
+            <div className="flex items-center justify-around px-2">
+              <button 
+                onClick={() => setActiveTab('dashboard')}
+                className={`flex flex-col items-center gap-1 p-2 min-w-[80px] transition-all relative ${activeTab === 'dashboard' ? 'text-blue-600' : 'text-slate-400'}`}
+              >
+                <LayoutDashboard size={20} strokeWidth={activeTab === 'dashboard' ? 2.5 : 2} />
+                <span className="text-[9px] font-black uppercase tracking-tighter">Home</span>
+              </button>
+
+              {/* Central Quick Add Action - Prominent New Sale */}
+              <div className="relative -top-4">
+                <button 
+                  onClick={() => setActiveTab('sales')}
+                  className={`w-14 h-14 rounded-2xl flex items-center justify-center shadow-xl transition-all active:scale-90 ${activeTab === 'sales' ? 'bg-blue-600 text-white shadow-blue-500/40 ring-4 ring-blue-50' : 'bg-slate-900 text-white shadow-slate-900/20'}`}
+                >
+                  <Plus size={28} strokeWidth={3} />
+                </button>
+                <div className="absolute top-16 left-1/2 -translate-x-1/2 whitespace-nowrap">
+                  <span className={`text-[8px] font-black uppercase tracking-tighter ${activeTab === 'sales' ? 'text-blue-600' : 'text-slate-400'}`}>New Sale</span>
+                </div>
+              </div>
+
+              <button 
+                onClick={() => setIsMobileMenuOpen(true)}
+                className="flex flex-col items-center gap-1 p-2 min-w-[80px] text-slate-400 transition-all"
+              >
+                <Menu size={20} />
+                <span className="text-[9px] font-black uppercase tracking-tighter">More</span>
+              </button>
+            </div>
           </div>
         )}
 
@@ -940,13 +1758,13 @@ export default function App() {
 
             <div className="flex-1 py-8 overflow-y-auto custom-scroll space-y-2 px-3">
               {[
-                { id: 'dashboard', icon: LayoutDashboard, label: 'Overview' },
+                { id: 'dashboard', icon: LayoutDashboard, label: 'Home' },
                 { id: 'pricing', icon: Database, label: 'Inventory' },
                 { id: 'sales', icon: PlusCircle, label: 'New Sale' },
                 { id: 'ledger', icon: History, label: 'Transactions' },
                 { id: 'reports', icon: BarChart3, label: 'Analytics' },
-                { id: 'profile', icon: UserCircle, label: 'Personal' },
-                ...(user?.role === 'Admin' ? [{ id: 'admin', icon: Settings, label: 'Systems' }] : []),
+                { id: 'profile', icon: UserCircle, label: 'Account' },
+                ...(user?.role === 'Admin' ? [{ id: 'admin', icon: Settings, label: 'Settings' }] : []),
               ].map(tab => (
                 <button
                   key={tab.id}
@@ -1025,8 +1843,10 @@ export default function App() {
                         <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mt-1">{user.role}</p>
                      </div>
                      <div className="relative">
-                        <div className="w-12 h-12 bg-gradient-to-br from-blue-600 to-blue-700 rounded-2xl flex items-center justify-center text-white font-black shadow-xl shadow-blue-500/20 ring-4 ring-white">
-                           {user.name.charAt(0)}
+                        <div className="w-12 h-12 bg-gradient-to-br from-blue-600 to-blue-700 rounded-2xl flex items-center justify-center text-white font-black shadow-xl shadow-blue-500/20 ring-4 ring-white overflow-hidden">
+                           {user.photoURL ? (
+                              <img src={user.photoURL} alt="" className="w-full h-full object-cover" />
+                           ) : user.name.charAt(0)}
                         </div>
                         <div className="absolute -bottom-1 -right-1 w-4 h-4 bg-emerald-500 border-2 border-white rounded-full" />
                      </div>
@@ -1088,14 +1908,31 @@ export default function App() {
                 </div>
               )}
 
-              <form onSubmit={handleEmailAuth} className="w-full space-y-4">
+               <form onSubmit={handleEmailAuth} className="w-full space-y-4">
                 <div className="space-y-3">
+                   {isSignUp && (
+                     <motion.div 
+                        initial={{ opacity: 0, y: -10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="relative"
+                     >
+                        <UserIcon className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={16} />
+                        <input 
+                          type="text" 
+                          required 
+                          placeholder="Full Name" 
+                          value={name}
+                          onChange={(e) => setName(e.target.value)}
+                          className="w-full pl-12 pr-4 py-3.5 bg-white border border-slate-200 rounded-2xl outline-none focus:border-blue-500 transition-all font-medium text-sm shadow-sm"
+                        />
+                     </motion.div>
+                   )}
                   <div className="relative">
                     <Mail className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={16} />
                     <input 
                       type="email" 
                       required 
-                      placeholder="Administrator ID" 
+                      placeholder="Email Address" 
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
                       className="w-full pl-12 pr-4 py-3.5 bg-white border border-slate-200 rounded-2xl outline-none focus:border-blue-500 transition-all font-medium text-sm shadow-sm"
@@ -1106,7 +1943,7 @@ export default function App() {
                     <input 
                       type="password" 
                       required 
-                      placeholder="Security PIN" 
+                      placeholder="Password" 
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
                       className="w-full pl-12 pr-4 py-3.5 bg-white border border-slate-200 rounded-2xl outline-none focus:border-blue-500 transition-all font-medium text-sm shadow-sm"
@@ -1118,8 +1955,60 @@ export default function App() {
                   disabled={loginLoading}
                   className="w-full bg-slate-900 text-white py-4 rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-blue-600 transition-all shadow-xl disabled:opacity-50"
                 >
-                  {loginLoading ? 'Authenticating...' : 'Sign In to CRM'}
+                  {loginLoading ? 'Authenticating...' : (isSignUp ? 'Create Account' : 'Login')}
                 </button>
+
+                {!isSignUp && (
+                  <button 
+                    type="button"
+                    onClick={handleResetPassword}
+                    className="text-[10px] font-bold text-slate-400 hover:text-blue-600 uppercase tracking-widest block mx-auto py-2"
+                  >
+                    Forgot Credentials?
+                  </button>
+                )}
+
+                <div className="relative py-4">
+                  <div className="absolute inset-0 flex items-center">
+                    <div className="w-full border-t border-slate-200"></div>
+                  </div>
+                  <div className="relative flex justify-center text-[10px] uppercase font-black tracking-widest">
+                    <span className="bg-slate-50 px-4 text-slate-400">Signup</span>
+                  </div>
+                </div>
+
+                <button 
+                  type="button"
+                  onClick={signInWithGoogle}
+                  disabled={loginLoading}
+                  className="w-full bg-white border border-slate-200 text-slate-700 py-4 rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-slate-50 transition-all shadow-sm flex items-center justify-center gap-3 disabled:opacity-50"
+                >
+                  <svg className="w-4 h-4" viewBox="0 0 24 24">
+                    <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                    <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                    <path fill="#FBBC05" d="M5.84 14.1c-.22-.66-.35-1.36-.35-2.1s.13-1.44.35-2.1V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l3.66-2.84z"/>
+                    <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+                    <path fill="none" d="M1 1h22v22H1z"/>
+                  </svg>
+                  Continue with Google
+                </button>
+
+                <div className="pt-6">
+                  <button 
+                    type="button"
+                    onClick={() => {
+                        setIsSignUp(!isSignUp);
+                        setLoginError(null);
+                    }}
+                    className="w-full py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-blue-600 border border-transparent hover:border-blue-100 hover:bg-blue-50 transition-all"
+                  >
+                    {isSignUp ? (
+                        <>Already registered? <span className="text-blue-600 ml-1">Secure Sign In</span></>
+                    ) : (
+                        <>New User? <span className="text-blue-600 ml-1">Create Account</span></>
+                    )}
+                  </button>
+                </div>
               </form>
               <div className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Authorized Personnel Only</div>
             </motion.div>
@@ -1131,9 +2020,10 @@ export default function App() {
               id="dashboard-panel"
               role="tabpanel"
               aria-labelledby="dashboard-tab"
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
+              initial={{ opacity: 0, x: 20, rotateY: 10 }}
+              animate={{ opacity: 1, x: 0, rotateY: 0 }}
+              exit={{ opacity: 0, x: -20, rotateY: -10 }}
+              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
               className="space-y-6"
             >
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-8">
@@ -1284,6 +2174,73 @@ export default function App() {
               </div>
 
               <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
+                  <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 flex items-center gap-2">
+                    <History size={14} className="text-blue-500" /> Recent Transactions
+                  </h3>
+                  <button 
+                    onClick={() => setActiveTab('ledger')}
+                    className="text-[10px] font-black text-blue-600 hover:text-blue-700 uppercase tracking-widest flex items-center gap-1"
+                  >
+                    View All <ArrowRight size={12} />
+                  </button>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left">
+                    <thead className="bg-slate-50 text-[9px] uppercase font-black text-slate-400">
+                      <tr>
+                        <th className="px-6 py-3">Sr.</th>
+                        <th className="px-6 py-3">Student</th>
+                        <th className="px-6 py-3">Date</th>
+                        <th className="px-6 py-3">Items</th>
+                        <th className="px-6 py-3 text-right">Amount</th>
+                        <th className="px-6 py-3">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-50">
+                      {records.slice(0, 5).map((r: any) => (
+                        <tr key={r.id} className="hover:bg-slate-50/50 transition-colors">
+                          <td className="px-6 py-4 font-mono text-[10px] text-slate-400">#{r.srNo}</td>
+                          <td className="px-6 py-4">
+                             <p className="text-[11px] font-black text-slate-800 uppercase leading-none">{r.name}</p>
+                             <p className="text-[9px] text-slate-400 font-bold mt-1 uppercase tracking-tighter">{r.studentClass}</p>
+                          </td>
+                          <td className="px-6 py-4 text-[10px] font-mono text-slate-500">{r.date}</td>
+                          <td className="px-6 py-4">
+                             <div className="flex flex-wrap gap-1">
+                                {r.items.slice(0, 2).map((it: any) => (
+                                  <span key={it.id} className="px-1.5 py-0.5 bg-slate-100 rounded text-[8px] font-bold text-slate-600 border border-slate-200">
+                                    {it.item}
+                                  </span>
+                                ))}
+                                {r.items.length > 2 && <span className="text-[8px] font-bold text-slate-400">+{r.items.length - 2} more</span>}
+                             </div>
+                          </td>
+                          <td className="px-6 py-4 text-right font-black text-slate-900 text-[11px] font-mono">₹{r.totalAmount}</td>
+                          <td className="px-6 py-4">
+                             <span className={`px-2 py-0.5 rounded-lg text-[8px] font-black uppercase border ${
+                               r.paymentMode === 'Pending' ? 'bg-amber-50 text-amber-600 border-amber-100' :
+                               r.paymentMode === 'UPI' ? 'bg-indigo-50 text-indigo-600 border-indigo-100' :
+                               'bg-emerald-50 text-emerald-600 border-emerald-100'
+                             }`}>
+                               {r.paymentMode}
+                             </span>
+                          </td>
+                        </tr>
+                      ))}
+                      {records.length === 0 && (
+                        <tr>
+                          <td colSpan={6} className="px-6 py-12 text-center">
+                            <p className="text-[10px] font-black uppercase text-slate-300 italic tracking-widest">No recent transactions found</p>
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
                 <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/50">
                   <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 flex items-center gap-2">
                     <Package size={14} className="text-blue-500" /> Granular Item Analysis (Sold Qty)
@@ -1369,9 +2326,10 @@ export default function App() {
               id="pricing-panel"
               role="tabpanel"
               aria-labelledby="pricing-tab"
-              initial={{ opacity: 0, x: 20 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: -20 }}
+              initial={{ opacity: 0, x: 20, rotateY: 10 }}
+              animate={{ opacity: 1, x: 0, rotateY: 0 }}
+              exit={{ opacity: 0, x: -20, rotateY: -10 }}
+              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
               className="max-w-4xl mx-auto space-y-6"
             >
               {/* Sub-navigation for Pricing */}
@@ -1402,6 +2360,8 @@ export default function App() {
               {pricingMode === 'prices' ? (
                 <PriceConfigSection 
                   pricing={pricing}
+                  itemOrder={itemOrder}
+                  updateItemOrder={updateItemOrder}
                   handlePriceChange={handlePriceChange}
                   renameItem={renameItem}
                   renameSize={renameSize}
@@ -1414,13 +2374,24 @@ export default function App() {
                   can={can}
                   exportPricing={exportPricing}
                   importPricing={importPricing}
+                  exportPricingExcel={exportPricingExcel}
+                  importPricingExcel={importPricingExcel}
+                  setMsg={setMsg}
                 />
               ) : (
                 <InventoryConfigSection 
                   pricing={pricing}
+                  itemOrder={itemOrder}
                   handleStockChange={handleStockChange}
                   handleMinStockChange={handleMinStockChange}
                   can={can}
+                  exportPricing={exportPricing}
+                  importPricing={importPricing}
+                  exportPricingExcel={exportPricingExcel}
+                  importPricingExcel={importPricingExcel}
+                  renameItem={renameItem}
+                  renameSize={renameSize}
+                  setMsg={setMsg}
                 />
               )}
 
@@ -1441,9 +2412,10 @@ export default function App() {
               id="sales-panel"
               role="tabpanel"
               aria-labelledby="sales-tab"
-              initial={{ opacity: 0, x: 20 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: -20 }}
+              initial={{ opacity: 0, x: 20, rotateY: 10 }}
+              animate={{ opacity: 1, x: 0, rotateY: 0 }}
+              exit={{ opacity: 0, x: -20, rotateY: -10 }}
+              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
               className="max-w-3xl mx-auto"
             >
               <SalesFormSection 
@@ -1496,9 +2468,10 @@ export default function App() {
               id="ledger-panel"
               role="tabpanel"
               aria-labelledby="ledger-tab"
-              initial={{ opacity: 0, x: 20 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: -20 }}
+              initial={{ opacity: 0, x: 20, rotateY: 10 }}
+              animate={{ opacity: 1, x: 0, rotateY: 0 }}
+              exit={{ opacity: 0, x: -20, rotateY: -10 }}
+              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
             >
               <LedgerSection 
                 records={filteredRecords}
@@ -1515,7 +2488,8 @@ export default function App() {
                 setItemFilter={setItemFilter}
                 classFilter={classFilter}
                 setClassFilter={setClassFilter}
-                exportCSV={exportCSV}
+                exportLedger={exportLedger}
+                importLedger={importLedger}
                 handlePrint={handlePrint}
                 deleteRecord={deleteRecord}
                 setEditingRecord={setEditingRecord}
@@ -1539,9 +2513,10 @@ export default function App() {
               id="reports-panel"
               role="tabpanel"
               aria-labelledby="reports-tab"
-              initial={{ opacity: 0, scale: 0.98 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.98 }}
+              initial={{ opacity: 0, x: 20, rotateY: 10 }}
+              animate={{ opacity: 1, x: 0, rotateY: 0 }}
+              exit={{ opacity: 0, x: -20, rotateY: -10 }}
+              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
             >
               <ReportsSection 
                 records={records}
@@ -1564,9 +2539,10 @@ export default function App() {
               id="profile-panel"
               role="tabpanel"
               aria-labelledby="profile-tab"
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
+              initial={{ opacity: 0, x: 20, rotateY: 10 }}
+              animate={{ opacity: 1, x: 0, rotateY: 0 }}
+              exit={{ opacity: 0, x: -20, rotateY: -10 }}
+              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
             >
               <ProfileSection 
                 user={user}
@@ -1586,9 +2562,10 @@ export default function App() {
               key="admin"
               id="admin-panel"
               role="tabpanel"
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
+              initial={{ opacity: 0, x: 20, rotateY: 10 }}
+              animate={{ opacity: 1, x: 0, rotateY: 0 }}
+              exit={{ opacity: 0, x: -20, rotateY: -10 }}
+              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
             >
               <AdminDashboard 
                 users={users}
@@ -1598,6 +2575,11 @@ export default function App() {
                 addCustomField={addCustomField}
                 removeCustomField={removeCustomField}
                 updateCustomField={updateCustomField}
+                syncSettings={syncSettings}
+                setupGoogleSheet={setupGoogleSheet}
+                toggleSync={toggleSync}
+                manualFullSync={manualFullSync}
+                isSyncing={isSyncing}
               />
             </motion.div>
           )}
@@ -1635,16 +2617,23 @@ export default function App() {
                 </div>
                 <div className="flex gap-3">
                   <button 
+                    disabled={isSubmitting}
                     onClick={() => setShowConfirmation(false)}
-                    className="flex-1 px-6 py-3 bg-slate-100 text-slate-600 rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-200 transition-all"
+                    className="flex-1 px-6 py-3 bg-slate-100 text-slate-600 rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-200 transition-all disabled:opacity-50"
                   >
                     Review
                   </button>
                   <button 
+                    disabled={isSubmitting}
                     onClick={submitTransaction}
-                    className="flex-1 px-6 py-3 bg-blue-600 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-blue-700 transition-all shadow-xl shadow-blue-500/20"
+                    className="flex-1 px-6 py-3 bg-blue-600 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-blue-700 transition-all shadow-xl shadow-blue-500/20 disabled:opacity-50 flex items-center justify-center gap-2"
                   >
-                    Save & Post
+                    {isSubmitting ? (
+                      <>
+                        <Loader2 className="animate-spin" size={14} />
+                        Posting...
+                      </>
+                    ) : 'Save & Post'}
                   </button>
                 </div>
               </motion.div>
@@ -1657,35 +2646,59 @@ export default function App() {
       </div>
 
       <footer className="hidden sm:block py-6 text-center text-[10px] font-bold text-slate-400 uppercase tracking-widest border-t border-slate-100 bg-white">
-        Uniform Sales CRM &bull; &copy; 2026 Internal Operations &bull; Restricted Access
+        {user ? (
+          <>Uniform Sales CRM &bull; &copy; 2026 Internal Operations &bull; Restricted Access</>
+        ) : (
+          <>Unauthorized Access Prohibited &bull; System Monitoring Active</>
+        )}
       </footer>
 
       {/* Mobile Bottom Nav */}
-      <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 px-2 py-2 flex sm:hidden justify-around items-center z-[100] shadow-[0_-10px_20px_rgba(0,0,0,0.05)]" role="tablist" aria-label="Mobile Navigation">
-        {[
-          { id: 'dashboard', icon: LayoutDashboard, label: 'Home' },
-          { id: 'pricing', icon: Settings, label: 'Pricing' },
-          { id: 'sales', icon: PlusCircle, label: 'Sale' },
-          { id: 'ledger', icon: History, label: 'Ledger' },
-          { id: 'reports', icon: BarChart3, label: 'Reports' },
-          { id: 'profile', icon: UserCircle, label: 'Profile' },
-        ].map(tab => (
-          <button
-            key={tab.id}
-            role="tab"
-            aria-selected={activeTab === tab.id}
-            onClick={() => setActiveTab(tab.id as any)}
-            className={`flex flex-col items-center gap-1 p-2 rounded-xl transition-all ${
-              activeTab === tab.id ? 'text-blue-600' : 'text-slate-400'
-            }`}
+      <AnimatePresence>
+        {user && (
+          <motion.div 
+            initial={{ y: 20, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            exit={{ y: 20, opacity: 0 }}
+            className="fixed bottom-0 left-0 right-0 bg-white/95 backdrop-blur-xl border-t border-slate-200 px-4 py-2 flex sm:hidden justify-between items-center z-[100] shadow-[0_-10px_30px_rgba(0,0,0,0.08)] pb-safe" 
+            role="tablist" 
+            aria-label="Mobile Navigation"
           >
-            <div className={`p-2 rounded-xl transition-colors ${activeTab === tab.id ? 'bg-blue-50' : 'bg-transparent'}`}>
-               <tab.icon size={20} strokeWidth={activeTab === tab.id ? 2.5 : 2} aria-hidden="true" />
+            {[
+              { id: 'dashboard', icon: LayoutDashboard, label: 'Home' },
+              { id: 'ledger', icon: History, label: 'Ledger' },
+              { id: 'pricing', icon: Database, label: 'Stock' },
+              { id: 'profile', icon: UserCircle, label: 'Account' },
+            ].map(tab => (
+              <button
+                key={tab.id}
+                role="tab"
+                aria-selected={activeTab === tab.id}
+                onClick={() => setActiveTab(tab.id as any)}
+                className={`flex flex-col items-center gap-1 p-2 flex-1 transition-all ${
+                  activeTab === tab.id ? 'text-blue-600' : 'text-slate-400 opacity-60'
+                }`}
+              >
+                <tab.icon size={20} strokeWidth={activeTab === tab.id ? 2.5 : 2} aria-hidden="true" />
+                <span className="text-[8px] font-black uppercase tracking-tighter">{tab.label}</span>
+              </button>
+            ))}
+
+            {/* Central Prominent Quick Add */}
+            <div className="relative -top-6 flex flex-col items-center">
+              <button 
+                onClick={() => setActiveTab('sales')}
+                className={`w-14 h-14 rounded-full flex items-center justify-center shadow-2xl transition-all active:scale-90 ${
+                  activeTab === 'sales' ? 'bg-blue-600 text-white shadow-blue-500/40 ring-4 ring-white' : 'bg-slate-900 text-white shadow-slate-900/40 ring-4 ring-white'
+                }`}
+              >
+                <Plus size={28} strokeWidth={3} />
+              </button>
+              <span className="text-[8px] font-black uppercase tracking-[0.2em] text-slate-400 mt-2">New Sale</span>
             </div>
-            <span className="text-[9px] font-black uppercase tracking-tighter">{tab.label}</span>
-          </button>
-        ))}
-      </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -1695,13 +2708,61 @@ function ProfileSection({ user, setUser, logout }: any) {
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [msg, setMsg] = useState<{ type: 'success' | 'error', text: string } | null>(null);
+  
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handleUpdateName = (e: React.FormEvent) => {
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      if (file.size > 2 * 1024 * 1024) {
+        setMsg({ type: 'error', text: 'File too large. Max 2MB.' });
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const img = new (window as any).Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          canvas.width = 300;
+          canvas.height = 300;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            const size = Math.min(img.width, img.height);
+            const x = (img.width - size) / 2;
+            const y = (img.height - size) / 2;
+            ctx.drawImage(img, x, y, size, size, 0, 0, 300, 300);
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+            updatePhoto(dataUrl);
+          }
+        };
+        img.src = event.target?.result as string;
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const updatePhoto = async (photoURL: string) => {
+    try {
+      await updateDoc(doc(db, 'users', user.id), { photoURL });
+      const updatedUser = { ...user, photoURL };
+      setUser(updatedUser);
+      setMsg({ type: 'success', text: 'Profile picture updated successfully.' });
+    } catch (err) {
+      setMsg({ type: 'error', text: 'Failed to save profile picture to database.' });
+    }
+  };
+
+  const handleUpdateName = async (e: React.FormEvent) => {
     e.preventDefault();
-    const updatedUser = { ...user, name };
-    setUser(updatedUser);
-    localStorage.setItem('uniform_user', JSON.stringify(updatedUser));
-    setMsg({ type: 'success', text: 'Profile name updated successfully.' });
+    try {
+      await updateDoc(doc(db, 'users', user.id), { name });
+      const updatedUser = { ...user, name };
+      setUser(updatedUser);
+      setMsg({ type: 'success', text: 'Profile name updated successfully.' });
+    } catch (err) {
+      setMsg({ type: 'error', text: 'Failed to update name in database.' });
+    }
     setTimeout(() => setMsg(null), 3000);
   };
 
@@ -1723,13 +2784,41 @@ function ProfileSection({ user, setUser, logout }: any) {
     <div className="max-w-4xl mx-auto space-y-8">
       <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">
         <div className="flex flex-col md:flex-row gap-8 items-start">
-          <div className="w-32 h-32 bg-blue-600 rounded-3xl flex items-center justify-center shadow-2xl shadow-blue-500/20 text-white shrink-0">
-             <UserCircle size={64} />
+          <div className="relative group self-center md:self-start">
+            <div className="w-32 h-32 bg-blue-600 rounded-3xl flex items-center justify-center shadow-2xl shadow-blue-500/20 text-white shrink-0 overflow-hidden relative">
+              {user?.photoURL ? (
+                <img src={user.photoURL} alt="Profile" className="w-full h-full object-cover" />
+              ) : (
+                <UserCircle size={64} />
+              )}
+            </div>
+
+            <div className="absolute -bottom-3 -right-3 flex flex-col gap-2 z-30">
+              <div className="flex gap-2">
+                <button 
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="p-3 bg-slate-900 text-white rounded-2xl shadow-lg hover:bg-indigo-600 transition-all border-4 border-white"
+                  title="Upload photo"
+                >
+                  <Upload size={18} />
+                </button>
+              </div>
+            </div>
+
+            <input 
+              type="file" 
+              ref={fileInputRef}
+              onChange={handleFileUpload}
+              accept="image/*"
+              className="hidden"
+            />
           </div>
-          <div className="space-y-4 flex-1">
+
+          <div className="space-y-4 flex-1 w-full text-left">
              <div className="space-y-1">
                 <h2 className="text-3xl font-black text-slate-900 tracking-tight">Account Settings</h2>
-                <p className="text-slate-500 font-medium">Manage your administrator profile and security.</p>
+                <p className="text-slate-500 font-medium">Manage your profile identification and security.</p>
              </div>
              
              {msg && (
@@ -1747,7 +2836,18 @@ function ProfileSection({ user, setUser, logout }: any) {
                    <h3 className="text-xs font-black uppercase tracking-widest text-slate-400">Basic Information</h3>
                    <div className="space-y-4">
                       <div className="space-y-1">
-                         <label className="text-[9px] font-black uppercase text-slate-400 ml-1">Email Address (Read Only)</label>
+                         <label className="text-[9px] font-black uppercase text-slate-400 ml-1 flex items-center gap-2">
+                           Email Address (Read Only)
+                           {user?.emailVerified ? (
+                             <span className="text-[8px] bg-emerald-50 text-emerald-600 px-1.5 py-0.5 rounded-full flex items-center gap-1">
+                               <Check size={8} /> Verified
+                             </span>
+                           ) : (
+                             <span className="text-[8px] bg-amber-50 text-amber-600 px-1.5 py-0.5 rounded-full flex items-center gap-1">
+                               <AlertCircle size={8} /> Pending
+                             </span>
+                           ) }
+                         </label>
                          <div className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-slate-400 font-bold text-sm cursor-not-allowed">
                             {user?.email}
                          </div>
@@ -1817,339 +2917,438 @@ function ProfileSection({ user, setUser, logout }: any) {
 }
 
 
-function AdminDashboard({ users, setUsers, currentUser, customFields, addCustomField, removeCustomField, updateCustomField }: any) {
-  const [newUserEmail, setNewUserEmail] = useState('');
-  const [newUserName, setNewUserName] = useState('');
-  const [newUserPassword, setNewUserPassword] = useState('');
-  const [newUserRole, setNewUserRole] = useState<UserRole>('Viewer');
+function AdminDashboard({ 
+  users, 
+  currentUser, 
+  customFields, 
+  addCustomField, 
+  removeCustomField, 
+  updateCustomField,
+  syncSettings,
+  setupGoogleSheet,
+  toggleSync,
+  manualFullSync,
+  isSyncing
+}: any) {
+  const [activeSubTab, setActiveSubTab] = useState<'users' | 'settings' | 'sync'>('users');
   const [msg, setMsg] = useState<{ type: 'success' | 'error', text: string } | null>(null);
+  const [isProcessing, setIsProcessing] = useState(false);
 
-  const handleAddUser = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (users.some((u: User) => u.email === newUserEmail)) {
-      setMsg({ type: 'error', text: 'User with this email already exists.' });
-      return;
-    }
-    const newUser: User = {
-      id: crypto.randomUUID(),
-      email: newUserEmail,
-      name: newUserName,
-      password: newUserPassword,
-      role: newUserRole,
-      createdAt: new Date().toISOString()
-    };
-    setUsers([...users, newUser]);
-    setMsg({ type: 'success', text: `User ${newUserName} added successfully.` });
-    setNewUserEmail('');
-    setNewUserName('');
-    setNewUserPassword('');
+  const showMsg = (type: 'success' | 'error', text: string) => {
+    setMsg({ type, text });
     setTimeout(() => setMsg(null), 3000);
   };
 
-  const handleDeleteUser = (id: string) => {
-    if (id === currentUser.id) {
-      setMsg({ type: 'error', text: 'You cannot delete yourself.' });
+  const handleUpdateRole = async (userId: string, role: UserRole) => {
+    if (userId === currentUser.id) {
+      showMsg('error', 'You cannot change your own role.');
       return;
     }
-    setUsers(users.filter((u: User) => u.id !== id));
-    setMsg({ type: 'success', text: 'User deleted successfully.' });
-    setTimeout(() => setMsg(null), 3000);
+    setIsProcessing(true);
+    try {
+      await setDoc(doc(db, 'users', userId), { role }, { merge: true });
+      showMsg('success', 'User role updated successfully.');
+    } catch (error) {
+      showMsg('error', 'Failed to update role.');
+      console.error(error);
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
-  const handleUpdateRole = (id: string, role: UserRole) => {
-    if (id === currentUser.id) {
-      setMsg({ type: 'error', text: 'You cannot change your own role.' });
+  const handleDeleteUser = async (userId: string) => {
+    if (userId === currentUser.id) {
+      showMsg('error', 'You cannot delete yourself.');
       return;
     }
-    setUsers(users.map((u: User) => u.id === id ? { ...u, role } : u));
-    setMsg({ type: 'success', text: 'User role updated successfully.' });
-    setTimeout(() => setMsg(null), 3000);
+    
+    // Using a more structured confirm check
+    const userName = users.find((u: User) => u.id === userId)?.name || 'this user';
+    if (!window.confirm(`Are you sure you want to delete ${userName}'s account? This action is permanent and will revoke all system access immediately.`)) return;
+    
+    setIsProcessing(true);
+    try {
+      await deleteDoc(doc(db, 'users', userId));
+      showMsg('success', `${userName}'s account has been successfully deleted.`);
+    } catch (error: any) {
+      handleFirestoreError(error, OperationType.DELETE, `users/${userId}`);
+      showMsg('error', 'Failed to delete user. Check console for details.');
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
   return (
-    <div className="max-w-6xl mx-auto space-y-12 pb-24 text-left">
-      {/* User Management Section */}
-      <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm space-y-8">
-        <div className="space-y-1 text-left">
-          <h2 className="text-3xl font-black text-slate-900 tracking-tight flex items-center gap-3">
-            <UserCircle className="text-blue-600" size={32} /> User Management
-          </h2>
-          <p className="text-slate-500 font-medium tracking-tight">Manage identifies, system roles, and access permissions for staff members.</p>
+    <div className="max-w-6xl mx-auto space-y-8 pb-32">
+      <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-6 text-left">
+        <div>
+          <h1 className="text-4xl font-black text-slate-900 tracking-tighter">System Control</h1>
+          <p className="text-slate-500 font-bold uppercase text-[10px] tracking-widest mt-1">Management Framework &bull; Admin Level</p>
         </div>
+        
+        <div className="flex bg-slate-100 p-1.5 rounded-2xl border border-slate-200">
+          {[
+            { id: 'users', label: 'Access Control', icon: Users },
+            { id: 'settings', label: 'Field Architecture', icon: Sliders },
+            { id: 'sync', label: 'Cloud Sync', icon: FileSpreadsheet }
+          ].map(tab => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveSubTab(tab.id as any)}
+              className={`px-6 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-2 ${
+                activeSubTab === tab.id ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'
+              }`}
+            >
+              <tab.icon size={14} /> {tab.label}
+            </button>
+          ))}
+        </div>
+      </div>
 
-        {msg && (
-          <motion.div 
-            initial={{ opacity: 0, scale: 0.95 }} 
-            animate={{ opacity: 1, scale: 1 }}
-            className={`p-4 rounded-2xl text-[10px] font-black uppercase tracking-widest ${msg.type === 'success' ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' : 'bg-red-50 text-red-600 border border-red-100'}`}
-          >
-            {msg.text}
-          </motion.div>
-        )}
+      {msg && (
+        <motion.div 
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className={`p-4 rounded-2xl flex items-center gap-3 ${
+            msg.type === 'success' ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' : 'bg-red-50 text-red-700 border border-red-100'
+          }`}
+        >
+          {msg.type === 'success' ? <Check size={18} /> : <AlertCircle size={18} />}
+          <span className="text-xs font-black uppercase tracking-widest">{msg.text}</span>
+        </motion.div>
+      )}
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-          {/* Add User Form */}
-          <div className="lg:col-span-1 bg-slate-50 p-6 rounded-3xl border border-slate-100 h-fit sticky top-24">
-            <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-6 flex items-center gap-2">
-              <Plus size={14} /> Add System User
-            </h3>
-            <form onSubmit={handleAddUser} className="space-y-4">
-              <div className="space-y-1">
-                <label className="text-[9px] font-black uppercase text-slate-400 ml-1 tracking-widest text-left block">Full Name</label>
-                <input 
-                  type="text" 
-                  required
-                  placeholder="e.g. John Doe"
-                  value={newUserName}
-                  onChange={(e) => setNewUserName(e.target.value)}
-                  className="w-full px-4 py-3 bg-white border border-slate-200 rounded-2xl text-slate-900 font-bold text-sm focus:border-blue-600 outline-none transition-all shadow-sm"
-                />
-              </div>
-              <div className="space-y-1">
-                <label className="text-[9px] font-black uppercase text-slate-400 ml-1 tracking-widest text-left block">Email Address</label>
-                <input 
-                  type="email" 
-                  required
-                  placeholder="johndoe@example.com"
-                  value={newUserEmail}
-                  onChange={(e) => setNewUserEmail(e.target.value)}
-                  className="w-full px-4 py-3 bg-white border border-slate-200 rounded-2xl text-slate-900 font-bold text-sm focus:border-blue-600 outline-none transition-all shadow-sm"
-                />
-              </div>
-              <div className="space-y-1">
-                <label className="text-[9px] font-black uppercase text-slate-400 ml-1 tracking-widest text-left block">Security PIN</label>
-                <input 
-                  type="text" 
-                  required
-                  placeholder="Min 6 characters"
-                  value={newUserPassword}
-                  onChange={(e) => setNewUserPassword(e.target.value)}
-                  className="w-full px-4 py-3 bg-white border border-slate-200 rounded-2xl text-slate-900 font-bold text-sm focus:border-blue-600 outline-none transition-all shadow-sm"
-                />
-              </div>
-              <div className="space-y-1">
-                <label className="text-[9px] font-black uppercase text-slate-400 ml-1 tracking-widest text-left block">Access Level</label>
-                <select 
-                  value={newUserRole}
-                  onChange={(e) => setNewUserRole(e.target.value as UserRole)}
-                  className="w-full px-4 py-3 bg-white border border-slate-200 rounded-2xl text-slate-900 font-bold text-sm focus:border-blue-600 outline-none transition-all shadow-sm cursor-pointer"
-                >
-                  <option value="Viewer">Viewer (Read Only)</option>
-                  <option value="Editor">Editor (Full Access)</option>
-                  <option value="Admin">Admin (All Areas)</option>
-                </select>
-              </div>
-              <button 
-                type="submit"
-                className="w-full py-4 bg-slate-900 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-blue-600 transition-all shadow-xl shadow-slate-200 mt-2"
-              >
-                Create Account
-              </button>
-            </form>
+      {activeSubTab === 'users' ? (
+        <div className="grid grid-cols-1 xl:grid-cols-4 gap-8">
+          <div className="xl:col-span-1 space-y-6">
+             <div className="bg-slate-900 text-white p-8 rounded-[2.5rem] shadow-2xl relative overflow-hidden text-left">
+                <div className="relative z-10 space-y-4">
+                   <div className="w-12 h-12 bg-blue-500 rounded-2xl flex items-center justify-center">
+                      <Users size={24} />
+                   </div>
+                   <h3 className="text-2xl font-black tracking-tight leading-tight">Identity Directory</h3>
+                   <p className="text-slate-400 text-xs font-medium">Manage user permissions and platform access. Users must register an account before appearing here.</p>
+                </div>
+                <div className="absolute -right-8 -bottom-8 opacity-10">
+                   <Users size={160} />
+                </div>
+             </div>
+
+             <div className="bg-white p-6 rounded-[2.5rem] border border-slate-200">
+                <h4 className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-6 px-1 text-left">Quick Invite Info</h4>
+                <div className="space-y-4">
+                   <div className="p-4 bg-blue-50 rounded-2xl border border-blue-100 text-left">
+                      <p className="text-[10px] font-bold text-blue-800 leading-relaxed">To add a new user, have them sign up with their email. Their default role will be 'Viewer'. You can then change their role to 'Editor' or 'Admin' from this dashboard.</p>
+                   </div>
+                </div>
+             </div>
           </div>
 
-          {/* User List */}
-          <div className="lg:col-span-2 space-y-6">
-            <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 ml-2 text-left">Active Directory ({users.length})</h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {users.map((u: User) => (
-                <div key={u.id} className="bg-white p-6 rounded-3xl border border-slate-100 shadow-sm hover:shadow-md transition-shadow relative group text-left">
-                  <div className="flex items-center gap-4">
-                    <div className={`w-12 h-12 rounded-2xl flex items-center justify-center font-black text-lg ${
-                      u.role === 'Admin' ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20' : 
-                      u.role === 'Editor' ? 'bg-indigo-50 text-indigo-600' : 'bg-slate-100 text-slate-500'
-                    }`}>
-                      {u.name.charAt(0)}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <h4 className="font-black text-slate-900 truncate tracking-tight">{u.name}</h4>
-                      <p className="text-[10px] font-bold text-slate-400 truncate mt-0.5">{u.email}</p>
-                    </div>
-                  </div>
-                  
-                  <div className="mt-6 flex items-center justify-between pt-4 border-t border-slate-50">
-                    <div className="flex flex-col gap-1">
-                      <span className="text-[8px] font-black uppercase text-slate-300 tracking-widest">Role</span>
+          <div className="xl:col-span-3">
+             <div className="bg-white rounded-[2.5rem] border border-slate-200 shadow-sm overflow-hidden">
+                <div className="overflow-x-auto">
+                   <table className="w-full text-left">
+                      <thead>
+                         <tr className="bg-slate-50 border-b border-slate-100 text-[9px] font-black uppercase tracking-widest text-slate-400">
+                            <th className="px-8 py-5">User Profile</th>
+                            <th className="px-8 py-5">System Role</th>
+                            <th className="px-8 py-5">Registered At</th>
+                            <th className="px-8 py-5 text-right">Actions</th>
+                         </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-50">
+                         {users.map((u: User) => (
+                            <tr key={u.id} className="hover:bg-slate-50/30 transition-colors group">
+                               <td className="px-8 py-6">
+                                  <div className="flex items-center gap-4 text-left">
+                                     <div className={`w-12 h-12 rounded-2xl flex items-center justify-center font-black text-lg overflow-hidden ${
+                                        u.role === 'Admin' ? 'bg-blue-600 text-white' : 
+                                        u.role === 'Editor' ? 'bg-indigo-100 text-indigo-600' : 'bg-slate-100 text-slate-400'
+                                     }`}>
+                                        {u.photoURL ? <img src={u.photoURL} alt="" className="w-full h-full object-cover" /> : u.name.charAt(0)}
+                                     </div>
+                                     <div>
+                                        <p className="font-black text-slate-900 group-hover:text-blue-600 transition-colors">{u.name}</p>
+                                        <p className="text-[10px] font-bold text-slate-400 font-mono mt-0.5">{u.email}</p>
+                                     </div>
+                                  </div>
+                               </td>
+                               <td className="px-8 py-6">
+                                  <select 
+                                     value={u.role}
+                                     disabled={u.id === currentUser.id || isProcessing}
+                                     onChange={(e) => handleUpdateRole(u.id, e.target.value as UserRole)}
+                                     className={`px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest outline-none border transition-all ${
+                                        u.role === 'Admin' ? 'bg-blue-50 text-blue-600 border-blue-100' :
+                                        u.role === 'Editor' ? 'bg-indigo-50 text-indigo-600 border-indigo-100' :
+                                        'bg-slate-50 text-slate-500 border-slate-200'
+                                     } ${u.id === currentUser.id ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:border-blue-300'}`}
+                                  >
+                                     <option value="Viewer">Viewer</option>
+                                     <option value="Editor">Editor</option>
+                                     <option value="Admin">Admin</option>
+                                  </select>
+                               </td>
+                               <td className="px-8 py-6">
+                                  <p className="text-[10px] font-bold text-slate-400 font-mono uppercase">
+                                     {u.createdAt ? new Date(u.createdAt).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : '---'}
+                                  </p>
+                               </td>
+                               <td className="px-8 py-6 text-right">
+                                  {u.id !== currentUser.id ? (
+                                     <button 
+                                        onClick={() => handleDeleteUser(u.id)}
+                                        disabled={isProcessing}
+                                        className="p-3 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-2xl transition-all"
+                                     >
+                                        <Trash2 size={18} />
+                                     </button>
+                                  ) : (
+                                     <span className="text-[8px] font-black uppercase text-blue-600 bg-blue-50 px-3 py-1 rounded-full tracking-widest">Self</span>
+                                  )}
+                               </td>
+                            </tr>
+                         ))}
+                      </tbody>
+                   </table>
+                </div>
+             </div>
+          </div>
+        </div>
+      ) : activeSubTab === 'settings' ? (
+        <div className="grid grid-cols-1 xl:grid-cols-4 gap-8">
+          <div className="xl:col-span-1 space-y-6">
+             <div className="bg-blue-600 text-white p-8 rounded-[2.5rem] shadow-2xl relative overflow-hidden text-left">
+                <div className="relative z-10 space-y-4">
+                   <div className="w-12 h-12 bg-white/20 backdrop-blur-md rounded-2xl flex items-center justify-center">
+                      <Sliders size={24} />
+                   </div>
+                   <h3 className="text-2xl font-black tracking-tight leading-tight">Data Architecture</h3>
+                   <p className="text-blue-100 text-xs font-medium">Define and configure custom metrics to capture specific information during the billing process.</p>
+                </div>
+                <div className="absolute -right-8 -bottom-8 opacity-10">
+                   <Sliders size={160} />
+                </div>
+             </div>
+          </div>
+
+          <div className="xl:col-span-3 space-y-4">
+             {customFields.map((field: any) => (
+                <div key={field.id} className="bg-white p-6 rounded-[2.5rem] border border-slate-200 shadow-sm flex flex-col sm:flex-row gap-6 items-start sm:items-center group hover:border-blue-200 transition-colors text-left">
+                   <div className="w-12 h-12 bg-slate-50 text-slate-400 rounded-2xl flex items-center justify-center shrink-0 group-hover:bg-blue-50 group-hover:text-blue-600 transition-colors">
+                      {field.type === 'number' ? <Hash size={20} /> : field.type === 'date' ? <Calendar size={20} /> : <Type size={20} />}
+                   </div>
+                   
+                   <div className="flex-1 min-w-0 space-y-1">
+                      <p className="text-[9px] font-black uppercase text-slate-400 tracking-widest">Field Identifier</p>
+                      <input 
+                         type="text" 
+                         value={field.label}
+                         onChange={(e) => updateCustomField(field.id, { label: e.target.value })}
+                         className="w-full text-lg font-black text-slate-900 border-none bg-transparent p-0 outline-none focus:ring-0"
+                      />
+                   </div>
+
+                   <div className="flex flex-wrap gap-2 items-center">
                       <select 
-                        value={u.role}
-                        disabled={u.id === currentUser.id}
-                        onChange={(e) => handleUpdateRole(u.id, e.target.value as UserRole)}
-                        className={`text-[10px] font-black uppercase tracking-widest outline-none bg-transparent ${
-                          u.role === 'Admin' ? 'text-blue-600' : 'text-slate-500'
-                        } ${u.id === currentUser.id ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:underline'}`}
+                         value={field.type}
+                         onChange={(e) => updateCustomField(field.id, { type: e.target.value as any })}
+                         className="bg-slate-50 border border-slate-100 rounded-xl px-4 py-2 text-[10px] font-black uppercase tracking-widest outline-none focus:border-blue-300"
                       >
-                        <option value="Viewer">Viewer</option>
-                        <option value="Editor">Editor</option>
-                        <option value="Admin">Admin</option>
+                         <option value="text">Textual</option>
+                         <option value="number">Numeric</option>
+                         <option value="date">Temporal</option>
                       </select>
-                    </div>
-                    {u.id !== currentUser.id && (
+
                       <button 
-                        onClick={() => handleDeleteUser(u.id)}
-                        className="p-2 text-slate-200 hover:text-red-500 transition-colors"
-                        title="Revoke Access"
+                         onClick={() => removeCustomField(field.id)}
+                         className="p-3 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-2xl transition-all"
                       >
-                        <Trash2 size={16} />
+                         <Trash2 size={18} />
                       </button>
-                    )}
-                  </div>
-                  {u.id === currentUser.id && (
-                    <div className="absolute top-4 right-4 bg-blue-50 text-blue-600 px-2 py-0.5 rounded-full text-[8px] font-black uppercase tracking-widest">
-                       Current
+                   </div>
+                </div>
+             ))}
+
+             <div className="bg-slate-50 border-2 border-dashed border-slate-200 rounded-[2.5rem] p-4 text-left">
+                <form onSubmit={addCustomField} className="flex flex-col sm:flex-row gap-4">
+                   <input 
+                      name="label"
+                      placeholder="Enter new field label..."
+                      required
+                      className="flex-1 bg-white border border-slate-200 rounded-2xl px-6 py-4 text-xs font-bold outline-none focus:border-blue-600 transition-all shadow-sm"
+                   />
+                   <select 
+                      name="type"
+                      className="bg-white border border-slate-200 rounded-2xl px-6 py-4 text-xs font-bold outline-none focus:border-blue-600 transition-all shadow-sm appearance-none"
+                   >
+                      <option value="text">Text Input</option>
+                      <option value="number">Number Input</option>
+                      <option value="date">Date Picker</option>
+                   </select>
+                   <button 
+                      type="submit"
+                      className="bg-slate-900 text-white px-8 py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-blue-600 transition-all shadow-xl shadow-slate-200"
+                   >
+                      Construct Field
+                   </button>
+                </form>
+             </div>
+          </div>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 xl:grid-cols-4 gap-8">
+           <div className="xl:col-span-1 space-y-6">
+              <div className="bg-emerald-600 text-white p-8 rounded-[2.5rem] shadow-2xl relative overflow-hidden text-left">
+                 <div className="relative z-10 space-y-4">
+                    <div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center">
+                       <FileSpreadsheet size={24} />
                     </div>
-                  )}
+                    <h3 className="text-2xl font-black tracking-tight leading-tight">Google Sheets<br/>Backup</h3>
+                    <p className="text-emerald-100 text-xs font-medium">Synchronize all ledger records with a live spreadsheet for external analysis and backup.</p>
+                 </div>
+                 <div className="absolute -right-8 -bottom-8 opacity-10">
+                    <CloudLightning size={160} />
+                 </div>
+              </div>
+
+              <div className="bg-white p-6 rounded-[2.5rem] border border-slate-200">
+                <h4 className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-6 px-1 text-left">Sync Invariant</h4>
+                <div className="space-y-4">
+                   <div className="p-4 bg-emerald-50 rounded-2xl border border-emerald-100 text-left">
+                      <p className="text-[10px] font-bold text-emerald-800 leading-relaxed">
+                        Data synchronization is real-time. Any entry, update, or deletion in the system is instantly reflected in your connected Google Sheet.
+                      </p>
+                   </div>
                 </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Custom Fields Management Section */}
-      <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm space-y-8">
-        <div className="space-y-1 text-left">
-          <h2 className="text-3xl font-black text-slate-900 tracking-tight flex items-center gap-3">
-            <Sliders className="text-blue-600" size={32} /> Custom Fields
-          </h2>
-          <p className="text-slate-500 font-medium tracking-tight">Define additional data points for capturing specific information during sales.</p>
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-           {/* Add Custom Field Form */}
-           <div className="lg:col-span-1 bg-slate-50 p-6 rounded-3xl border border-slate-100 h-fit sticky top-24">
-            <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-6 flex items-center gap-2 text-left">
-              <Plus size={14} /> New Field Blueprint
-            </h3>
-            <form onSubmit={addCustomField} className="space-y-4">
-              <div className="space-y-1">
-                <label className="text-[9px] font-black uppercase text-slate-400 ml-1 tracking-widest text-left block">Field Label</label>
-                <input 
-                  name="label"
-                  type="text" 
-                  required
-                  placeholder="e.g. Roll Number"
-                  className="w-full px-4 py-3 bg-white border border-slate-200 rounded-2xl text-slate-900 font-bold text-sm focus:border-blue-600 outline-none transition-all shadow-sm"
-                />
               </div>
-              <div className="space-y-1">
-                <label className="text-[9px] font-black uppercase text-slate-400 ml-1 tracking-widest text-left block">Input Type</label>
-                <select 
-                  name="type"
-                  className="w-full px-4 py-3 bg-white border border-slate-200 rounded-2xl text-slate-900 font-bold text-sm focus:border-blue-600 outline-none transition-all shadow-sm cursor-pointer"
-                >
-                  <option value="text">Standard Text</option>
-                  <option value="number">Numeric Input</option>
-                  <option value="date">Date Picker</option>
-                </select>
-              </div>
-              <div className="flex items-center gap-3 px-1 py-1">
-                <input 
-                  id="req-toggle"
-                  name="required"
-                  type="checkbox"
-                  className="w-5 h-5 rounded-lg border-2 border-slate-300 text-blue-600 focus:ring-blue-500 transition-all cursor-pointer"
-                />
-                <label htmlFor="req-toggle" className="text-[10px] font-black uppercase tracking-widest text-slate-500 cursor-pointer select-none">
-                  Mandatory Submission
-                </label>
-              </div>
-              <button 
-                type="submit"
-                className="w-full py-4 bg-slate-900 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-blue-600 transition-all shadow-xl shadow-slate-200 mt-2"
-              >
-                Add Field
-              </button>
-            </form>
-          </div>
+           </div>
 
-          {/* Custom Fields List */}
-          <div className="lg:col-span-2 space-y-6">
-            <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 ml-2 text-left">Configured Data Points</h3>
-            <div className="space-y-4">
-              {!customFields || customFields.length === 0 ? (
-                <div className="bg-slate-50 border border-dashed border-slate-200 rounded-[2rem] p-16 text-center">
-                  <div className="w-16 h-16 bg-white rounded-2xl flex items-center justify-center text-slate-300 mx-auto mb-4 border border-slate-100 shadow-sm">
-                    <Sliders size={32} />
-                  </div>
-                  <h4 className="font-black text-slate-900 text-sm uppercase tracking-widest mb-1">No Custom Fields</h4>
-                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Fields added here will appear in the sales flow.</p>
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {customFields.map((field: any) => (
-                    <motion.div 
-                      layout
-                      key={field.id} 
-                      className="bg-white p-6 rounded-3xl border border-slate-100 shadow-sm hover:shadow-md transition-all relative overflow-hidden text-left"
-                    >
-                      <div className="flex items-start justify-between mb-4">
-                        <div className="flex items-center gap-4">
-                          <div className="w-12 h-12 bg-slate-50 rounded-2xl flex items-center justify-center text-slate-400 border border-slate-100 shadow-inner">
-                             {field.type === 'text' && <Type size={20} />}
-                             {field.type === 'number' && <Hash size={20} />}
-                             {field.type === 'date' && <Calendar size={20} />}
-                          </div>
-                          <div className="text-left">
-                            <input 
-                              type="text" 
-                              value={field.label}
-                              onChange={(e) => updateCustomField(field.id, { label: e.target.value })}
-                              className="text-sm font-black text-slate-900 bg-transparent outline-none border-b-2 border-transparent focus:border-blue-600 min-w-[140px] tracking-tight"
-                            />
-                            <div className="flex items-center gap-2 mt-1">
-                              <span className="text-[8px] font-black uppercase tracking-[0.2em] text-slate-400">{field.type}</span>
-                              {field.required && (
-                                <span className="bg-amber-50 text-amber-600 px-2 py-0.5 rounded-full text-[7px] font-black uppercase tracking-widest border border-amber-100">Mandatory</span>
-                              )}
+           <div className="xl:col-span-3">
+              <div className="bg-white rounded-[2.5rem] border border-slate-200 shadow-sm p-10 text-left">
+                 {!syncSettings || !syncSettings.spreadsheetId ? (
+                   <div className="space-y-8 max-w-lg">
+                      <div className="space-y-2">
+                        <h3 className="text-2xl font-black text-slate-900">Initialize Integration</h3>
+                        <p className="text-slate-500 text-sm">Connect your Google workspace account to begin the synchronization process.</p>
+                      </div>
+
+                      <div className="space-y-4 p-6 bg-slate-50 rounded-[2rem] border border-slate-100">
+                         <div className="flex items-center gap-4">
+                            <div className="w-10 h-10 bg-white rounded-xl shadow-sm flex items-center justify-center text-blue-600">
+                               <CheckCircle size={20} />
                             </div>
-                          </div>
-                        </div>
-                        <button 
-                          onClick={() => removeCustomField(field.id)}
-                          className="p-2 text-slate-200 hover:text-red-500 transition-colors"
-                          title="Delete Field"
-                        >
-                          <Trash2 size={18} />
-                        </button>
+                            <p className="text-xs font-bold text-slate-700">Automatic real-time data push</p>
+                         </div>
+                         <div className="flex items-center gap-4">
+                            <div className="w-10 h-10 bg-white rounded-xl shadow-sm flex items-center justify-center text-blue-600">
+                               <CheckCircle size={20} />
+                            </div>
+                            <p className="text-xs font-bold text-slate-700">One-click spreadsheet generation</p>
+                         </div>
+                         <div className="flex items-center gap-4">
+                            <div className="w-10 h-10 bg-white rounded-xl shadow-sm flex items-center justify-center text-blue-600">
+                               <CheckCircle size={20} />
+                            </div>
+                            <p className="text-xs font-bold text-slate-700">Dynamic column architecture</p>
+                         </div>
                       </div>
 
-                      <div className="flex flex-col gap-4 pt-4 border-t border-slate-50">
-                        <div className="flex items-center justify-between">
-                          <label className="text-[8px] font-black uppercase text-slate-400 tracking-widest">Change Type</label>
-                          <select 
-                            value={field.type}
-                            onChange={(e) => updateCustomField(field.id, { type: e.target.value as any })}
-                            className="bg-transparent text-[10px] font-black uppercase tracking-widest text-blue-600 outline-none cursor-pointer hover:underline"
-                          >
-                            <option value="text">Text</option>
-                            <option value="number">Number</option>
-                            <option value="date">Date</option>
-                          </select>
+                      <button 
+                        onClick={setupGoogleSheet}
+                        disabled={isSyncing}
+                        className="w-full sm:w-auto px-10 py-5 bg-slate-900 text-white rounded-full font-black text-xs uppercase tracking-widest hover:bg-emerald-600 transition-all shadow-xl shadow-slate-900/10 flex items-center justify-center gap-4"
+                      >
+                        {isSyncing ? 'Configuring Nodes...' : 'Connect Google Sheets'}
+                        <ExternalLink size={18} />
+                      </button>
+                   </div>
+                 ) : (
+                   <div className="space-y-8">
+                      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6 pb-8 border-b border-slate-100">
+                        <div className="space-y-2">
+                           <div className="flex items-center gap-3">
+                              <h3 className="text-2xl font-black text-slate-900">Sync Status</h3>
+                              <span className={`px-3 py-1 rounded-full text-[8px] font-black uppercase tracking-tighter ${syncSettings.enabled ? 'bg-emerald-100 text-emerald-600' : 'bg-red-100 text-red-600 animate-pulse'}`}>
+                                {syncSettings.enabled ? 'Active Pulse' : 'Paused'}
+                              </span>
+                           </div>
+                           <p className="text-slate-500 text-xs font-mono truncate max-w-xs md:max-w-md">ID: {syncSettings.spreadsheetId}</p>
                         </div>
-                        <div className="flex items-center justify-between">
-                          <label className="text-[8px] font-black uppercase text-slate-400 tracking-widest">Required Status</label>
-                          <button 
-                            onClick={() => updateCustomField(field.id, { required: !field.required })}
-                            className={`flex items-center gap-2 px-3 py-1.5 rounded-xl transition-all ${
-                              field.required ? 'bg-blue-50 text-blue-600 border border-blue-100' : 'bg-slate-50 text-slate-400 border border-slate-100'
-                            }`}
-                          >
-                             <div className={`w-2 h-2 rounded-full ${field.required ? 'bg-blue-600 animate-pulse' : 'bg-slate-300'}`} />
-                             <span className="text-[9px] font-black uppercase tracking-widest">{field.required ? 'Active' : 'N/A'}</span>
-                          </button>
+                        
+                        <div className="flex items-center gap-4">
+                           <button 
+                             onClick={() => toggleSync(!syncSettings.enabled)}
+                             className={`px-6 py-3 rounded-2xl font-black text-[10px] uppercase tracking-widest transition-all ${
+                               syncSettings.enabled 
+                                 ? 'bg-red-50 text-red-600 hover:bg-red-100' 
+                                 : 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100'
+                             }`}
+                           >
+                             {syncSettings.enabled ? 'Disable Sync' : 'Enable Sync'}
+                           </button>
+
+                           <a 
+                             href={`https://docs.google.com/spreadsheets/d/${syncSettings.spreadsheetId}`}
+                             target="_blank"
+                             rel="noopener noreferrer"
+                             className="px-6 py-3 bg-slate-900 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-800 transition-all shadow-lg shadow-slate-900/10 flex items-center gap-2"
+                           >
+                             Open Sheet <ExternalLink size={14} />
+                           </a>
                         </div>
                       </div>
-                    </motion.div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                         <div className="p-8 bg-slate-50 rounded-[2.5rem] border border-slate-100 space-y-6">
+                            <div className="space-y-2">
+                               <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Maintenance Mode</p>
+                               <h4 className="text-lg font-black text-slate-900">Force Full Refresh</h4>
+                               <p className="text-xs text-slate-500 leading-relaxed">
+                                  Resets the spreadsheet and re-uploads all current ledger records. Useful if the sheet was manually edited or shared incorrectly.
+                               </p>
+                            </div>
+                            <button 
+                              onClick={manualFullSync}
+                              disabled={isSyncing}
+                              className="w-full py-4 bg-white border-2 border-slate-200 text-slate-600 rounded-2xl font-black text-[10px] uppercase tracking-widest hover:border-emerald-500 hover:text-emerald-600 transition-all flex items-center justify-center gap-2"
+                            >
+                              {isSyncing ? 'Syncing...' : 'Initiate Full Sync'}
+                              <RefreshCw size={14} />
+                            </button>
+                         </div>
+
+                         <div className="p-8 bg-blue-50/30 rounded-[2.5rem] border border-blue-100/50 space-y-6">
+                            <div className="space-y-2">
+                               <p className="text-[10px] font-black text-blue-400 uppercase tracking-widest">Integration Health</p>
+                               <h4 className="text-lg font-black text-slate-900">Migration & Swap</h4>
+                               <p className="text-xs text-slate-500 leading-relaxed">
+                                  Need a new sheet? Disconnecting will clear the current connection but won't delete the file in your Google Drive.
+                               </p>
+                            </div>
+                            <button 
+                              onClick={async () => {
+                                if(window.confirm("Are you sure? This will stop syncing to this sheet.")) {
+                                    await setupGoogleSheet();
+                                }
+                              }}
+                              className="w-full py-4 bg-white border-2 border-blue-200 text-blue-600 rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-blue-600 hover:text-white transition-all flex items-center justify-center gap-2"
+                            >
+                              Swap Target Sheet
+                              <Share size={14} />
+                            </button>
+                         </div>
+                      </div>
+                   </div>
+                 )}
+              </div>
+           </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
+
 
 function ReportsSection({ 
   records, pricing, dateStart, setDateStart, dateEnd, setDateEnd, 
@@ -2268,28 +3467,50 @@ function ReportsSection({
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 pt-4">
-          <div className="space-y-2">
-            <label className="text-[9px] font-black uppercase text-slate-400 ml-1 tracking-widest block">Start Date</label>
-            <div className="relative">
-              <Calendar className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
-              <input 
-                type="date" 
-                value={dateStart} 
-                onChange={e => { setDateStart(e.target.value); setReportReady(false); }} 
-                className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl outline-none text-xs font-bold focus:bg-white focus:border-blue-500 transition-all" 
-              />
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-[9px] font-black uppercase text-slate-400 ml-1 tracking-widest block">Date Range</label>
+              <div className="flex gap-2">
+                <div className="relative flex-1">
+                  <Calendar className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                  <input 
+                    type="date" 
+                    value={dateStart} 
+                    onChange={e => { setDateStart(e.target.value); setReportReady(false); }} 
+                    className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl outline-none text-xs font-bold focus:bg-white focus:border-blue-500 transition-all shadow-sm" 
+                  />
+                </div>
+                <div className="relative flex-1">
+                  <Calendar className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                  <input 
+                    type="date" 
+                    value={dateEnd} 
+                    onChange={e => { setDateEnd(e.target.value); setReportReady(false); }} 
+                    className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl outline-none text-xs font-bold focus:bg-white focus:border-blue-500 transition-all shadow-sm" 
+                  />
+                </div>
+              </div>
             </div>
-          </div>
-          <div className="space-y-2">
-            <label className="text-[9px] font-black uppercase text-slate-400 ml-1 tracking-widest block">End Date</label>
-            <div className="relative">
-              <Calendar className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
-              <input 
-                type="date" 
-                value={dateEnd} 
-                onChange={e => { setDateEnd(e.target.value); setReportReady(false); }} 
-                className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl outline-none text-xs font-bold focus:bg-white focus:border-blue-500 transition-all" 
-              />
+            <div className="flex flex-wrap gap-1 items-center px-1">
+              {[
+                { label: 'Today', d: 0 },
+                { label: 'Last 7 Days', d: 7 },
+                { label: 'This Month', d: 30 }
+              ].map(q => (
+                <button 
+                  key={q.label}
+                  onClick={() => {
+                    const end = new Date().toISOString().split('T')[0];
+                    const start = new Date(Date.now() - q.d * 86400000).toISOString().split('T')[0];
+                    setDateStart(start);
+                    setDateEnd(end);
+                    setReportReady(false);
+                  }}
+                  className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-[8px] font-black uppercase rounded-lg text-slate-500 transition-all"
+                >
+                  {q.label}
+                </button>
+              ))}
             </div>
           </div>
           <div className="space-y-2">
@@ -2299,11 +3520,12 @@ function ReportsSection({
               <select 
                 value={itemFilter} 
                 onChange={e => { setItemFilter(e.target.value); setReportReady(false); }} 
-                className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl outline-none text-xs font-bold focus:bg-white focus:border-blue-500 transition-all appearance-none cursor-pointer"
+                className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl outline-none text-xs font-bold focus:bg-white focus:border-blue-500 transition-all appearance-none cursor-pointer shadow-sm"
               >
                 <option value="All">Cross-Item Analysis</option>
                 {itemNames.map(name => <option key={name} value={name}>{name}</option>)}
               </select>
+              <ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-300 pointer-events-none" size={12} />
             </div>
           </div>
           <div className="space-y-2">
@@ -2313,11 +3535,12 @@ function ReportsSection({
               <select 
                 value={classFilter} 
                 onChange={e => { setClassFilter(e.target.value); setReportReady(false); }} 
-                className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl outline-none text-xs font-bold focus:bg-white focus:border-blue-500 transition-all appearance-none cursor-pointer"
+                className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl outline-none text-xs font-bold focus:bg-white focus:border-blue-500 transition-all appearance-none cursor-pointer shadow-sm"
               >
                 <option value="All">Global Overview</option>
                 {CLASSES.map(cls => <option key={cls} value={cls}>{cls}</option>)}
               </select>
+              <ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-300 pointer-events-none" size={12} />
             </div>
           </div>
         </div>
@@ -2806,278 +4029,444 @@ function SearchableSelect({
   );
 }
 
-function PriceConfigSection({ pricing, handlePriceChange, renameItem, renameSize, addNewItem, deleteItem, addNewSize, deleteSize, newItem, setNewItem, can, exportPricing, importPricing }: any) {
-  const fileInputRef = useRef<HTMLInputElement>(null);
+function PriceConfigSection({ pricing, itemOrder, updateItemOrder, handlePriceChange, renameItem, renameSize, addNewItem, deleteItem, addNewSize, deleteSize, newItem, setNewItem, can, exportPricing, importPricing, exportPricingExcel, importPricingExcel, setMsg }: any) {
+  const jsonFileInputRef = useRef<HTMLInputElement>(null);
+  const excelFileInputRef = useRef<HTMLInputElement>(null);
 
   return (
-    <section className="bg-white rounded-2xl shadow-xl border border-slate-200 overflow-hidden">
-      <div className="bg-slate-50 px-6 py-5 border-b border-slate-200 flex justify-between items-center">
-        <h2 className="font-black text-slate-800 uppercase text-[10px] tracking-[0.2em] flex items-center gap-2">
-          <Tag size={14} className="text-blue-500" />
+    <section className="bg-white rounded-[32px] shadow-xl shadow-slate-200/50 border border-slate-100 overflow-hidden">
+      <div className="bg-slate-900 px-8 py-6 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+        <h2 className="font-black text-white uppercase text-[10px] tracking-[0.2em] flex items-center gap-2">
+          <Tag size={16} className="text-blue-400" />
           Price Configuration
         </h2>
-        <div className="flex items-center gap-3">
-          <button 
-            onClick={exportPricing}
-            className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-[9px] font-black uppercase tracking-widest text-slate-600 hover:text-blue-600 hover:border-blue-200 transition-all shadow-sm"
-            title="Export to JSON"
-          >
-            <DownloadCloud size={14} /> Export
-          </button>
-          <div className="relative">
-            <input 
-              type="file" 
-              accept=".json"
-              ref={fileInputRef}
-              onChange={importPricing}
-              className="hidden"
-            />
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="group relative">
             <button 
-              onClick={() => fileInputRef.current?.click()}
-              className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-xl text-[9px] font-black uppercase tracking-widest text-slate-600 hover:text-emerald-600 hover:border-emerald-200 transition-all shadow-sm"
-              title="Import from JSON"
+              className="flex items-center gap-2 px-5 py-3 bg-slate-800 text-white rounded-2xl text-[9px] font-black uppercase tracking-widest hover:bg-slate-700 transition-all shadow-lg active:scale-95"
             >
+              <DownloadCloud size={14} /> Export
+            </button>
+            <div className="absolute right-0 top-full mt-2 w-48 bg-white border border-slate-200 rounded-2xl shadow-2xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 overflow-hidden">
+               <button onClick={exportPricingExcel} className="w-full text-left px-4 py-4 text-[10px] font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-2 border-b border-slate-50 text-slate-700">
+                  <FileSpreadsheet size={16} className="text-emerald-500" /> Excel (.xlsx)
+               </button>
+               <button onClick={exportPricing} className="w-full text-left px-4 py-4 text-[10px] font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-2 text-slate-700">
+                  <PackageSearch size={16} className="text-blue-500" /> JSON (.json)
+               </button>
+            </div>
+          </div>
+
+          <div className="group relative">
+            <input type="file" accept=".json" ref={jsonFileInputRef} onChange={importPricing} className="hidden" />
+            <input type="file" accept=".xlsx,.xls,.csv" ref={excelFileInputRef} onChange={importPricingExcel} className="hidden" />
+            
+            <button className="flex items-center gap-2 px-5 py-3 bg-blue-600 text-white rounded-2xl text-[9px] font-black uppercase tracking-widest hover:bg-blue-500 transition-all shadow-lg active:scale-95">
               <Upload size={14} /> Import
             </button>
+            
+            <div className="absolute right-0 top-full mt-2 w-48 bg-white border border-slate-200 rounded-2xl shadow-2xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 overflow-hidden">
+               <button onClick={() => excelFileInputRef.current?.click()} className="w-full text-left px-4 py-4 text-[10px] font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-2 border-b border-slate-50 text-slate-700">
+                  <FileSpreadsheet size={16} className="text-emerald-500" /> Excel (.xlsx)
+               </button>
+               <button onClick={() => jsonFileInputRef.current?.click()} className="w-full text-left px-4 py-4 text-[10px] font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-2 text-slate-700">
+                  <PackageSearch size={16} className="text-blue-500" /> JSON (.json)
+               </button>
+            </div>
           </div>
         </div>
       </div>
       
-      <div className="p-6 overflow-x-auto custom-scroll">
-        <div className="flex gap-6 min-w-max pb-4">
+      <div className="p-8 overflow-x-auto custom-scroll">
+        <Reorder.Group 
+          axis="x" 
+          values={itemOrder} 
+          onReorder={updateItemOrder} 
+          className="flex gap-6 min-w-max pb-4"
+        >
           <AnimatePresence mode="popLayout">
-            {Object.entries(pricing).map(([item, sizes]: [string, any]) => (
-              <motion.div 
-                key={item} 
-                layout
-                initial={{ opacity: 0, scale: 0.95 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.9 }}
-                className="w-72 bg-slate-50/50 rounded-2xl border border-slate-200 flex flex-col overflow-hidden shrink-0 group/item transition-all hover:shadow-2xl hover:shadow-blue-500/5 hover:-translate-y-1"
-              >
-                {/* Header: Item Name */}
-                <div className="bg-white px-5 py-4 border-b border-slate-200 flex justify-between items-center">
-                  <div className="flex items-center gap-3 flex-1">
-                    <div className="p-2 bg-blue-50 text-blue-600 rounded-xl">
-                      <Package size={16} />
+            {itemOrder.map((item) => {
+              const sizes = pricing[item] || {};
+              return (
+                <Reorder.Item 
+                  key={item} 
+                  value={item}
+                  dragListener={true}
+                  className="w-72 bg-slate-50/50 rounded-[32px] border border-slate-200 flex flex-col overflow-hidden shrink-0 group/item transition-all hover:shadow-2xl hover:shadow-blue-500/5 hover:-translate-y-1 relative"
+                >
+                  {/* Header: Item Name */}
+                  <div className="bg-white px-6 py-5 border-b border-slate-200 flex justify-between items-center cursor-grab active:cursor-grabbing">
+                    <div className="flex items-center gap-3 flex-1">
+                      <div className="p-2 bg-blue-50 text-blue-600 rounded-xl">
+                        <Package size={16} />
+                      </div>
+                      {can('edit') ? (
+                        <div className="relative flex-1 group/input">
+                          <input 
+                            type="text"
+                            defaultValue={item}
+                            aria-label={`Rename item ${item}`}
+                            onBlur={(e) => {
+                              const newVal = e.target.value.trim();
+                              if (newVal && newVal !== item) {
+                                if (pricing[newVal]) {
+                                  setMsg({ type: 'error', text: `Category "${newVal}" already exists.` });
+                                  e.target.value = item;
+                                } else {
+                                  renameItem(item, newVal);
+                                }
+                              } else {
+                                e.target.value = item;
+                              }
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') e.currentTarget.blur();
+                              if (e.key === 'Escape') {
+                                e.currentTarget.value = item;
+                                e.currentTarget.blur();
+                              }
+                              e.stopPropagation();
+                            }}
+                            className="text-[11px] font-black text-slate-800 uppercase tracking-widest bg-transparent border-b-2 border-transparent hover:border-blue-100 focus:border-blue-500 focus:bg-blue-50/50 px-1 -ml-1 rounded-md outline-none w-full transition-all cursor-text"
+                          />
+                          <Pencil size={10} className="absolute right-0 top-1/2 -translate-y-1/2 text-slate-300 opacity-0 group-hover/input:opacity-100 pointer-events-none transition-opacity" />
+                        </div>
+                      ) : (
+                        <span className="text-[11px] font-black text-slate-800 uppercase tracking-widest">{item}</span>
+                      )}
                     </div>
-                    {can('edit') ? (
-                      <input 
-                        type="text"
-                        defaultValue={item}
-                        aria-label={`Rename item ${item}`}
-                        onBlur={(e) => renameItem(item, e.target.value)}
-                        onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
-                        className="text-[11px] font-black text-slate-800 uppercase tracking-widest bg-transparent border-b border-transparent hover:border-blue-200 focus:border-blue-500 outline-none w-full transition-all cursor-edit"
-                      />
-                    ) : (
-                      <span className="text-[11px] font-black text-slate-800 uppercase tracking-widest">{item}</span>
+                    {can('delete') && (
+                      <button 
+                        onClick={() => deleteItem(item)}
+                        aria-label={`Delete ${item}`}
+                        className="text-slate-300 hover:text-red-500 p-2 rounded-xl hover:bg-red-50 transition-all ml-2"
+                      >
+                        <Trash2 size={16} />
+                      </button>
                     )}
                   </div>
-                  {can('delete') && (
-                    <button 
-                      onClick={() => deleteItem(item)}
-                      aria-label={`Delete ${item}`}
-                      className="text-slate-300 hover:text-red-500 p-2 rounded-xl hover:bg-red-50 transition-all ml-2"
-                    >
-                      <Trash2 size={16} />
-                    </button>
-                  )}
-                </div>
 
-                {/* Sub-headings Row */}
-                <div className="grid grid-cols-2 px-5 py-3 bg-slate-100/50 border-b border-slate-200">
-                  <span className="text-[10px] font-black text-slate-500 uppercase tracking-[0.1em]">Size</span>
-                  <span className="text-[10px] font-black text-slate-500 uppercase tracking-[0.1em] text-right">Price (₹)</span>
-                </div>
+                  {/* Sub-headings Row */}
+                  <div className="grid grid-cols-2 px-6 py-3 bg-slate-100/50 border-b border-slate-200">
+                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Size</span>
+                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Price (₹)</span>
+                  </div>
 
-                {/* Rows Area */}
-                <div className="flex-1 overflow-y-auto max-h-[350px] custom-scroll">
-                  {Object.entries(sizes).map(([size, info]: [string, any]) => (
-                    <div key={size} className="grid grid-cols-2 items-center px-5 py-3 border-b border-slate-100 hover:bg-white transition-colors group/row">
-                      {can('edit') ? (
-                        <input 
-                          type="text"
-                          defaultValue={size}
-                          onBlur={(e) => renameSize(item, size, e.target.value)}
-                          onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
-                          className="text-[10px] font-bold text-slate-600 uppercase bg-transparent outline-none border-b border-transparent hover:border-blue-200 transition-all w-full pr-2"
-                        />
-                      ) : (
-                        <span className="text-[10px] font-bold text-slate-600 uppercase truncate pr-2">{size}</span>
-                      )}
-                      
-                      <div className="flex items-center justify-end gap-1 relative">
+                  {/* Rows Area */}
+                  <div className="flex-1 overflow-y-auto max-h-[350px] custom-scroll">
+                    {Object.entries(sizes).map(([size, info]: [string, any]) => (
+                      <div key={size} className="grid grid-cols-2 items-center px-6 py-4 border-b border-slate-100 hover:bg-white transition-colors group/row">
                         {can('edit') ? (
-                          <input 
-                            type="number" 
-                            value={info.price}
-                            onChange={(e) => handlePriceChange(item, size, Number(e.target.value))}
-                            className="w-20 text-right text-[11px] font-black text-slate-900 bg-slate-100/50 px-2 py-1 rounded-lg outline-none focus:bg-blue-50 focus:ring-1 focus:ring-blue-200 transition-all"
-                          />
+                          <div className="relative group/input">
+                            <input 
+                              type="text"
+                              defaultValue={size}
+                              onBlur={(e) => {
+                                const newVal = e.target.value.trim();
+                                if (newVal && newVal !== size) {
+                                  if (pricing[item][newVal]) {
+                                    setMsg({ type: 'error', text: `Size "${newVal}" already exists for this item.` });
+                                    e.target.value = size;
+                                  } else {
+                                    renameSize(item, size, newVal);
+                                  }
+                                } else {
+                                  e.target.value = size;
+                                }
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') e.currentTarget.blur();
+                                if (e.key === 'Escape') {
+                                  e.currentTarget.value = size;
+                                  e.currentTarget.blur();
+                                }
+                              }}
+                              className="text-[10px] font-bold text-slate-600 uppercase bg-transparent outline-none border-b-2 border-transparent hover:border-blue-100 focus:border-blue-500 focus:bg-blue-50/50 px-1 -ml-1 rounded-sm transition-all w-full pr-4"
+                            />
+                            <Pencil size={8} className="absolute right-1 top-1/2 -translate-y-1/2 text-slate-300 opacity-0 group-hover/input:opacity-100 pointer-events-none transition-opacity" />
+                          </div>
                         ) : (
-                          <span className="text-[11px] font-black text-slate-900">{info.price}</span>
+                          <span className="text-[10px] font-bold text-slate-600 uppercase truncate pr-2">{size}</span>
                         )}
-                        {can('delete') && (
-                          <button 
-                            onClick={() => deleteSize(item, size)}
-                            className="absolute -right-5 text-slate-200 hover:text-red-500 opacity-0 group-hover/row:opacity-100 transition-all p-1"
-                          >
-                            <X size={10} />
-                          </button>
-                        )}
+                        
+                        <div className="flex items-center justify-end gap-1 relative">
+                          {can('edit') ? (
+                            <input 
+                              type="number" 
+                              value={info.price}
+                              onChange={(e) => handlePriceChange(item, size, Number(e.target.value))}
+                              className="w-20 text-right text-[11px] font-black text-slate-900 bg-slate-100/50 px-3 py-2 rounded-xl outline-none focus:bg-blue-50 focus:ring-4 focus:ring-blue-100 transition-all"
+                            />
+                          ) : (
+                            <span className="text-[11px] font-black text-slate-900">{info.price}</span>
+                          )}
+                          {can('delete') && (
+                            <button 
+                              onClick={() => deleteSize(item, size)}
+                              className="absolute -right-5 text-slate-200 hover:text-red-500 opacity-0 group-hover/row:opacity-100 transition-all p-1"
+                            >
+                              <X size={10} />
+                            </button>
+                          )}
+                        </div>
                       </div>
-                    </div>
-                  ))}
-                  
-                  {Object.entries(sizes).length === 0 && (
-                    <div className="flex flex-col items-center justify-center py-12 px-6 text-center space-y-2 opacity-40">
-                      <Hash size={24} className="text-slate-300" />
-                      <p className="text-[10px] font-bold uppercase tracking-widest">No sizes added</p>
-                    </div>
-                  )}
-                </div>
+                    ))}
+                    
+                    {Object.entries(sizes).length === 0 && (
+                      <div className="flex flex-col items-center justify-center py-12 px-6 text-center space-y-2 opacity-40">
+                        <Hash size={24} className="text-slate-300" />
+                        <p className="text-[10px] font-bold uppercase tracking-widest">No sizes added</p>
+                      </div>
+                    )}
+                  </div>
 
-                {/* Footer: Add New Size Form */}
-                {can('add') && (
-                  <form 
-                    onSubmit={(e) => addNewSize(item, e)}
-                    className="p-4 bg-white border-t border-slate-200"
-                  >
-                    <div className="flex gap-2">
-                      <input name="size" placeholder="SIZE" className="w-16 px-3 py-2 text-[10px] uppercase font-black bg-slate-50 border border-slate-100 rounded-xl outline-none focus:border-blue-500 focus:bg-white transition-all text-center" required />
-                      <input name="price" type="number" placeholder="PRICE ₹" className="flex-1 px-3 py-2 text-[10px] font-bold bg-slate-50 border border-slate-100 rounded-xl outline-none focus:border-blue-500 focus:bg-white transition-all" required />
-                      <button type="submit" className="bg-blue-600 text-white p-2 rounded-xl hover:bg-blue-700 transition-all active:scale-95 shadow-md shadow-blue-500/20">
-                        <Plus size={14} strokeWidth={3} />
-                      </button>
-                    </div>
-                  </form>
-                )}
-              </motion.div>
-            ))}
+                  {/* Footer: Add New Size Form */}
+                  {can('add') && (
+                    <form 
+                      onSubmit={(e) => addNewSize(item, e)}
+                      className="p-5 bg-white border-t border-slate-200"
+                    >
+                      <div className="flex gap-2">
+                        <input name="size" placeholder="SIZE" className="w-16 px-3 py-2 text-[10px] uppercase font-black bg-slate-50 border border-slate-100 rounded-xl outline-none focus:ring-4 focus:ring-blue-50 focus:border-blue-500 focus:bg-white transition-all text-center" required />
+                        <input name="price" type="number" placeholder="PRICE ₹" className="flex-1 px-3 py-2 text-[10px] font-bold bg-slate-50 border border-slate-100 rounded-xl outline-none focus:ring-4 focus:ring-blue-50 focus:border-blue-500 focus:bg-white transition-all" required />
+                        <button type="submit" className="bg-blue-600 text-white p-2.5 rounded-xl hover:bg-blue-700 transition-all active:scale-95 shadow-lg shadow-blue-500/20">
+                          <Plus size={14} strokeWidth={3} />
+                        </button>
+                      </div>
+                    </form>
+                  )}
+                </Reorder.Item>
+              );
+            })}
           </AnimatePresence>
 
           {/* Add New Item Column Form */}
           {can('add') && (
-            <div className="w-72 bg-slate-50 border-2 border-dashed border-slate-300 rounded-2xl flex flex-col shrink-0 overflow-hidden hover:border-blue-300 hover:bg-blue-50/20 transition-all group/newitem">
+            <div className="w-72 bg-slate-50 border-2 border-dashed border-slate-200 rounded-[32px] flex flex-col shrink-0 overflow-hidden hover:border-blue-300 hover:bg-blue-50/20 transition-all group/newitem">
                <div className="flex-1 flex flex-col items-center justify-center p-8 text-center space-y-4">
-                  <div className="w-12 h-12 bg-white rounded-2xl flex items-center justify-center text-slate-300 shadow-sm border border-slate-100 group-hover/newitem:text-blue-500 group-hover/newitem:scale-110 transition-all">
-                    <PlusCircle size={24} strokeWidth={1.5} />
+                  <div className="w-14 h-14 bg-white rounded-2xl flex items-center justify-center text-slate-300 shadow-sm border border-slate-100 group-hover/newitem:text-blue-500 group-hover/newitem:scale-110 group-hover/newitem:shadow-lg transition-all">
+                    <PlusCircle size={28} strokeWidth={1.5} />
                   </div>
                   <div>
                      <h3 className="text-xs font-black text-slate-800 uppercase tracking-widest mb-1">New Category</h3>
-                     <p className="text-[10px] text-slate-400 font-medium">Add a new item to price list</p>
+                     <p className="text-[10px] text-slate-400 font-medium">Extend your product range</p>
                   </div>
                   <form onSubmit={addNewItem} className="w-full space-y-3">
                     <input 
                       name="itemName"
                       placeholder="Item Name (e.g. Tie)"
-                      className="w-full px-4 py-3 text-xs text-center border border-slate-200 rounded-xl bg-white focus:border-blue-500 outline-none transition-all font-semibold shadow-sm"
+                      className="w-full px-5 py-4 text-xs text-center border-2 border-slate-100 rounded-2xl bg-white focus:border-blue-500 focus:ring-8 focus:ring-blue-50 outline-none transition-all font-semibold shadow-sm"
                       required
                     />
-                    <button type="submit" className="w-full bg-slate-900 text-white font-black text-[10px] py-3 rounded-xl tracking-[0.2em] hover:bg-blue-600 transition-all shadow-lg active:scale-95 uppercase">
-                      CREATE COLUMN
+                    <button type="submit" className="w-full bg-slate-900 text-white font-black text-[10px] py-4 rounded-2xl tracking-[0.2em] hover:bg-blue-600 transition-all shadow-xl active:scale-95 uppercase">
+                      INITIALIZE COLUMN
                     </button>
                   </form>
                </div>
             </div>
           )}
-        </div>
+        </Reorder.Group>
       </div>
     </section>
   );
 }
 
-function InventoryConfigSection({ pricing, handleStockChange, handleMinStockChange, can }: any) {
+function InventoryConfigSection({ pricing, itemOrder, handleStockChange, handleMinStockChange, can, exportPricing, importPricing, exportPricingExcel, importPricingExcel, renameItem, renameSize, setMsg }: any) {
+  const jsonFileInputRef = useRef<HTMLInputElement>(null);
+  const excelFileInputRef = useRef<HTMLInputElement>(null);
+
   return (
-    <section className="bg-white rounded-2xl shadow-xl border border-slate-200 overflow-hidden">
-      <div className="bg-slate-50 px-6 py-5 border-b border-slate-200 flex justify-between items-center">
-        <h2 className="font-black text-slate-800 uppercase text-[10px] tracking-[0.2em] flex items-center gap-2">
-          <Package size={14} className="text-orange-500" />
+    <section className="bg-white rounded-[32px] shadow-xl shadow-slate-200/50 border border-slate-100 overflow-hidden">
+      <div className="bg-slate-900 px-8 py-6 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+        <h2 className="font-black text-white uppercase text-[10px] tracking-[0.2em] flex items-center gap-2">
+          <Package size={16} className="text-orange-400" />
           Inventory Management
         </h2>
-        <div className="flex items-center gap-4 text-[10px] font-black uppercase text-slate-400">
-           <div className="flex items-center gap-1.5"><div className="w-2 h-2 rounded-full bg-red-500" /> Low Stock</div>
-           <div className="flex items-center gap-1.5"><div className="w-2 h-2 rounded-full bg-slate-200" /> Sufficient</div>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="group relative">
+            <button className="flex items-center gap-2 px-5 py-3 bg-slate-800 text-white rounded-2xl text-[9px] font-black uppercase tracking-widest hover:bg-slate-700 transition-all shadow-lg active:scale-95">
+              <DownloadCloud size={14} /> Export
+            </button>
+            <div className="absolute right-0 top-full mt-2 w-48 bg-white border border-slate-200 rounded-2xl shadow-2xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 overflow-hidden">
+               <button onClick={exportPricingExcel} className="w-full text-left px-4 py-4 text-[10px] font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-2 border-b border-slate-50 text-slate-700">
+                  <FileSpreadsheet size={16} className="text-emerald-500" /> Excel (.xlsx)
+               </button>
+               <button onClick={exportPricing} className="w-full text-left px-4 py-4 text-[10px] font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-2 text-slate-700">
+                  <PackageSearch size={16} className="text-blue-500" /> JSON (.json)
+               </button>
+            </div>
+          </div>
+
+          <div className="group relative">
+            <input type="file" accept=".json" ref={jsonFileInputRef} onChange={importPricing} className="hidden" />
+            <input type="file" accept=".xlsx,.xls,.csv" ref={excelFileInputRef} onChange={importPricingExcel} className="hidden" />
+            
+            <button className="flex items-center gap-2 px-5 py-3 bg-orange-600 text-white rounded-2xl text-[9px] font-black uppercase tracking-widest hover:bg-orange-500 transition-all shadow-lg active:scale-95">
+              <Upload size={14} /> Import
+            </button>
+            
+            <div className="absolute right-0 top-full mt-2 w-48 bg-white border border-slate-200 rounded-2xl shadow-2xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 overflow-hidden">
+               <button onClick={() => excelFileInputRef.current?.click()} className="w-full text-left px-4 py-4 text-[10px] font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-2 border-b border-slate-50 text-slate-700">
+                  <FileSpreadsheet size={16} className="text-emerald-500" /> Excel (.xlsx)
+               </button>
+               <button onClick={() => jsonFileInputRef.current?.click()} className="w-full text-left px-4 py-4 text-[10px] font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-2 text-slate-700">
+                  <PackageSearch size={16} className="text-blue-500" /> JSON (.json)
+               </button>
+            </div>
+          </div>
+          
+          <div className="h-6 w-px bg-slate-700 mx-2 hidden md:block" />
+
+          <div className="flex items-center gap-4 text-[10px] font-black uppercase text-slate-400">
+            <div className="flex items-center gap-1.5"><div className="w-2 h-2 rounded-full bg-red-500" /> Low Stock</div>
+            <div className="flex items-center gap-1.5"><div className="w-2 h-2 rounded-full bg-slate-200" /> Sufficient</div>
+          </div>
         </div>
       </div>
       
-      <div className="p-6 overflow-x-auto custom-scroll">
+      <div className="p-8 overflow-x-auto custom-scroll">
         <div className="flex gap-6 min-w-max pb-4">
           <AnimatePresence mode="popLayout">
-            {Object.entries(pricing).map(([item, sizes]: [string, any]) => (
-              <motion.div 
-                key={item} 
-                layout
-                initial={{ opacity: 0, scale: 0.95 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.9 }}
-                className="w-64 bg-slate-50/50 rounded-2xl border border-slate-200 flex flex-col overflow-hidden shrink-0 group/item transition-all hover:shadow-xl"
-              >
-                {/* Header */}
-                <div className="bg-white px-5 py-4 border-b border-slate-200 flex items-center gap-3">
-                  <div className="p-2 bg-orange-50 text-orange-600 rounded-xl">
-                    <Database size={16} />
-                  </div>
-                  <span className="text-[11px] font-black text-slate-800 uppercase tracking-widest truncate">{item}</span>
-                </div>
-
-                {/* Column Headers */}
-                <div className="grid grid-cols-3 px-5 py-3 bg-slate-100/50 border-b border-slate-200">
-                  <span className="text-[10px] font-black text-slate-400 uppercase">Size</span>
-                  <span className="text-[10px] font-black text-slate-400 uppercase text-center">In Stock</span>
-                  <span className="text-[10px] font-black text-slate-400 uppercase text-right">Min</span>
-                </div>
-
-                {/* Rows */}
-                <div className="flex-1 overflow-y-auto max-h-[400px] custom-scroll">
-                  {Object.entries(sizes).map(([size, info]: [string, any]) => {
-                    const isLow = info.stock <= info.minStock;
-                    return (
-                      <div key={size} className="grid grid-cols-3 items-center px-5 py-3 border-b border-slate-100 hover:bg-white transition-colors">
-                        <span className="text-[10px] font-black text-slate-600 uppercase">{size}</span>
-                        
-                        <div className="flex justify-center">
-                          {can('edit') ? (
-                            <input 
-                              type="number"
-                              value={info.stock}
-                              onChange={(e) => handleStockChange(item, size, Number(e.target.value))}
-                              className={`w-12 text-center text-[11px] font-black outline-none bg-slate-100/50 py-1 rounded-lg transition-all focus:ring-1 ${isLow ? 'text-red-600 bg-red-50 focus:ring-red-200' : 'text-slate-800 focus:ring-slate-300'}`}
-                            />
-                          ) : (
-                            <span className={`text-[11px] font-black ${isLow ? 'text-red-600' : 'text-slate-800'}`}>
-                              {info.stock}
-                            </span>
-                          )}
-                        </div>
-
-                        <div className="flex justify-end">
-                          {can('edit') ? (
-                            <input 
-                              type="number"
-                              value={info.minStock}
-                              onChange={(e) => handleMinStockChange(item, size, Number(e.target.value))}
-                              className="w-10 text-right text-[10px] font-bold text-slate-400 outline-none bg-transparent hover:bg-slate-50 rounded"
-                            />
-                          ) : (
-                            <span className="text-[10px] font-bold text-slate-400">
-                              {info.minStock}
-                            </span>
-                          )}
-                        </div>
+            {itemOrder.map((item: string) => {
+              const sizes = pricing[item] || {};
+              return (
+                <motion.div 
+                  key={item} 
+                  layout
+                  initial={{ opacity: 0, scale: 0.95 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.9 }}
+                  className="w-72 bg-slate-50/50 rounded-[32px] border border-slate-200 flex flex-col overflow-hidden shrink-0 group/item transition-all hover:shadow-2xl hover:shadow-orange-500/5 hover:-translate-y-1"
+                >
+                  {/* Header: Item Name */}
+                  <div className="bg-white px-6 py-5 border-b border-slate-200 flex justify-between items-center">
+                    <div className="flex items-center gap-3 flex-1">
+                      <div className="p-2 bg-orange-50 text-orange-600 rounded-xl">
+                        <Package size={16} />
                       </div>
-                    );
-                  })}
-                  
-                  {Object.entries(sizes).length === 0 && (
-                    <div className="py-12 text-center">
-                      <p className="text-[10px] font-bold uppercase text-slate-300">No data</p>
+                      {can('edit') ? (
+                        <div className="relative flex-1 group/input">
+                          <input 
+                            type="text"
+                            defaultValue={item}
+                            aria-label={`Rename item ${item}`}
+                            onBlur={(e) => {
+                              const newVal = e.target.value.trim();
+                              if (newVal && newVal !== item) {
+                                if (pricing[newVal]) {
+                                  setMsg({ type: 'error', text: `Category "${newVal}" already exists.` });
+                                  e.target.value = item;
+                                } else {
+                                  renameItem(item, newVal);
+                                }
+                              } else {
+                                e.target.value = item;
+                              }
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') e.currentTarget.blur();
+                              if (e.key === 'Escape') {
+                                e.currentTarget.value = item;
+                                e.currentTarget.blur();
+                              }
+                            }}
+                            className="text-[11px] font-black text-slate-800 uppercase tracking-widest bg-transparent border-b-2 border-transparent hover:border-orange-100 focus:border-orange-500 focus:bg-orange-50/50 px-1 -ml-1 rounded-md outline-none w-full transition-all cursor-text"
+                          />
+                          <Pencil size={10} className="absolute right-0 top-1/2 -translate-y-1/2 text-slate-300 opacity-0 group-hover/input:opacity-100 pointer-events-none transition-opacity" />
+                        </div>
+                      ) : (
+                        <span className="text-[11px] font-black text-slate-800 uppercase tracking-widest">{item}</span>
+                      )}
                     </div>
-                  )}
-                </div>
-              </motion.div>
-            ))}
+                  </div>
+
+                  {/* Sub-headings Row */}
+                  <div className="grid grid-cols-3 px-6 py-3 bg-slate-100/50 border-b border-slate-200">
+                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Size</span>
+                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Stock</span>
+                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Min</span>
+                  </div>
+
+                  {/* Rows Area */}
+                  <div className="flex-1 overflow-y-auto max-h-[350px] custom-scroll">
+                    {Object.entries(sizes).map(([size, info]: [string, any]) => {
+                      const isLowStock = info.stock <= (info.minStock || 0);
+                      return (
+                        <div key={size} className="grid grid-cols-3 items-center px-6 py-4 border-b border-slate-100 hover:bg-white transition-colors group/row">
+                          {can('edit') ? (
+                            <div className="relative group/input">
+                              <input 
+                                type="text"
+                                defaultValue={size}
+                                onBlur={(e) => {
+                                  const newVal = e.target.value.trim();
+                                  if (newVal && newVal !== size) {
+                                    if (pricing[item][newVal]) {
+                                      setMsg({ type: 'error', text: `Size "${newVal}" already exists for this item.` });
+                                      e.target.value = size;
+                                    } else {
+                                      renameSize(item, size, newVal);
+                                    }
+                                  } else {
+                                    e.target.value = size;
+                                  }
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') e.currentTarget.blur();
+                                  if (e.key === 'Escape') {
+                                    e.currentTarget.value = size;
+                                    e.currentTarget.blur();
+                                  }
+                                }}
+                                className="text-[10px] font-bold text-slate-600 uppercase bg-transparent outline-none border-b-2 border-transparent hover:border-orange-100 focus:border-orange-500 focus:bg-orange-50/50 px-1 -ml-1 rounded-sm transition-all w-full pr-4"
+                              />
+                              <Pencil size={8} className="absolute right-1 top-1/2 -translate-y-1/2 text-slate-300 opacity-0 group-hover/input:opacity-100 pointer-events-none transition-opacity" />
+                            </div>
+                          ) : (
+                            <span className="text-[10px] font-bold text-slate-600 uppercase truncate pr-2">{size}</span>
+                          )}
+                          
+                          <div className="flex justify-center">
+                            {can('edit') ? (
+                              <input 
+                                type="number" 
+                                value={info.stock}
+                                onChange={(e) => handleStockChange(item, size, Number(e.target.value))}
+                                className={`w-16 text-center text-[11px] font-black px-2 py-1.5 rounded-lg outline-none focus:ring-4 transition-all ${
+                                  isLowStock ? 'bg-red-50 text-red-600 focus:ring-red-100' : 'bg-slate-100/50 text-slate-900 focus:ring-slate-100'
+                                }`}
+                              />
+                            ) : (
+                              <span className={`text-[11px] font-black ${isLowStock ? 'text-red-500' : 'text-slate-900'}`}>{info.stock}</span>
+                            )}
+                          </div>
+
+                          <div className="flex justify-end">
+                            {can('edit') ? (
+                              <input 
+                                type="number" 
+                                value={info.minStock || 0}
+                                onChange={(e) => handleMinStockChange(item, size, Number(e.target.value))}
+                                className="w-14 text-right text-[10px] font-bold text-slate-400 bg-transparent outline-none focus:text-blue-600 transition-all"
+                              />
+                            ) : (
+                              <span className="text-[10px] font-bold text-slate-400">{info.minStock || 0}</span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                    
+                    {Object.entries(sizes).length === 0 && (
+                      <div className="flex flex-col items-center justify-center py-12 px-6 text-center space-y-2 opacity-40">
+                        <Package size={24} className="text-slate-300" />
+                        <p className="text-[10px] font-bold uppercase tracking-widest">No sizes added</p>
+                      </div>
+                    )}
+                  </div>
+                </motion.div>
+              );
+            })}
           </AnimatePresence>
         </div>
       </div>
@@ -3093,7 +4482,23 @@ function SalesFormSection({
   addCustomField, removeCustomField, updateCustomField, recentRecords, can
 }: any) {
   const [activeStep, setActiveStep] = useState(1);
+  const [showAddedMsg, setShowAddedMsg] = useState(false);
+
+  const handleAddToCart = (e: any) => {
+    addToCart(e);
+    if (!studentName.trim()) return; // addToCart validates studentName
+    setShowAddedMsg(true);
+    setTimeout(() => setShowAddedMsg(false), 2000);
+  };
+
+  const handleAddToCartAndGoToRemarks = (e: any) => {
+    handleAddToCart(e);
+    if (!studentName.trim()) return;
+    setActiveStep(4);
+  };
   const isCustomFieldsValid = customFields.every((f: any) => !f.required || (customValues[f.id] && String(customValues[f.id]).trim() !== ''));
+  const missingFields = customFields.filter((f: any) => f.required && (!customValues[f.id] || String(customValues[f.id]).trim() === ''));
+
   const steps = [
     { id: 1, name: 'Identity', icon: <Hash size={12} /> },
     { id: 2, name: 'Student', icon: <UserIcon size={12} /> },
@@ -3115,10 +4520,11 @@ function SalesFormSection({
           {steps.map((step) => (
             <div 
               key={step.id}
-              className={`flex items-center gap-2 px-4 py-2 rounded-xl transition-all duration-300 ${
+              onClick={() => setActiveStep(step.id)}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl transition-all duration-300 cursor-pointer ${
                 activeStep === step.id 
                   ? 'bg-white text-blue-600 shadow-sm ring-1 ring-slate-200 shadow-slate-200' 
-                  : 'text-slate-400'
+                  : 'text-slate-400 hover:text-slate-600'
               }`}
             >
               <div className={`w-5 h-5 rounded-lg flex items-center justify-center text-[10px] font-black ${
@@ -3194,6 +4600,20 @@ function SalesFormSection({
                 </motion.div>
               )}
               
+              {missingFields.length > 0 && cart.length > 0 && (
+                <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="bg-amber-50 text-amber-700 p-4 rounded-2xl border border-amber-100 text-[10px] font-black uppercase tracking-widest flex items-start gap-3">
+                  <AlertCircle size={16} className="shrink-0" />
+                  <div>
+                    <p className="mb-1">Missing Mandatory Information:</p>
+                    <ul className="list-disc list-inside opacity-70">
+                      {missingFields.map((f: any) => (
+                        <li key={f.id}>{f.label}</li>
+                      ))}
+                    </ul>
+                  </div>
+                </motion.div>
+              )}
+              
               {/* Identity Section */}
               <motion.div 
                 onViewportEnter={() => setActiveStep(1)}
@@ -3237,6 +4657,14 @@ function SalesFormSection({
                       />
                     </div>
                   </div>
+                </div>
+                <div className="pt-4 flex justify-end">
+                  <button 
+                    onClick={() => setActiveStep(2)}
+                    className="px-6 py-3 bg-blue-600 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-blue-700 transition-all flex items-center gap-2"
+                  >
+                    Next Step <ArrowRight size={14} />
+                  </button>
                 </div>
               </motion.div>
 
@@ -3306,6 +4734,20 @@ function SalesFormSection({
                     ))}
                   </div>
                 )}
+                <div className="pt-4 flex justify-between">
+                  <button 
+                    onClick={() => setActiveStep(1)}
+                    className="px-6 py-3 bg-slate-100 text-slate-600 rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-200 transition-all flex items-center gap-2"
+                  >
+                    <ArrowLeft size={14} /> Back
+                  </button>
+                  <button 
+                    onClick={() => setActiveStep(3)}
+                    className="px-6 py-3 bg-blue-600 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-blue-700 transition-all flex items-center gap-2"
+                  >
+                    Next Step <ArrowRight size={14} />
+                  </button>
+                </div>
               </motion.div>
 
               {/* Inventory Selection */}
@@ -3347,11 +4789,25 @@ function SalesFormSection({
                         disabled={!can('add')}
                         value={newItem.qty} 
                         onChange={(e) => setNewItem((p: any) => ({ ...p, qty: Number(e.target.value) }))} 
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleAddToCart(e);
+                          }
+                        }}
                         type="number" 
                         min="1" 
-                        className="w-full pl-14 pr-6 py-4 bg-slate-50 border-2 border-transparent rounded-[20px] outline-none text-base font-mono font-black focus:bg-white focus:border-blue-500 focus:ring-8 focus:ring-blue-50 transition-all disabled:opacity-50 text-right" 
+                        className={`w-full pl-14 pr-6 py-4 bg-slate-50 border-2 rounded-[20px] outline-none text-base font-mono font-black focus:bg-white focus:ring-8 transition-all disabled:opacity-50 text-right ${
+                          newItem.qty > (pricing[newItem.item]?.[newItem.size]?.stock || 0) 
+                            ? 'border-red-500 focus:ring-red-50 text-red-600' 
+                            : 'border-transparent focus:border-blue-500 focus:ring-blue-50'
+                        }`} 
+                        placeholder="1"
                       />
                     </div>
+                    {newItem.qty > (pricing[newItem.item]?.[newItem.size]?.stock || 0) && (
+                      <p className="text-[10px] text-red-500 font-bold mt-1 ml-1 animate-pulse">Insufficient Stock!</p>
+                    )}
                   </div>
                   
                   <div className="relative px-6 py-5 bg-white border-2 border-slate-100 rounded-[20px] flex items-center justify-between shadow-sm overflow-hidden transition-all hover:border-blue-200">
@@ -3372,15 +4828,52 @@ function SalesFormSection({
                 </div>
 
                 {can('add') && (
-                  <button 
-                    onClick={addToCart} 
-                    className="w-full py-5 bg-slate-900 text-white rounded-2xl font-black text-xs uppercase tracking-[0.2em] shadow-xl shadow-slate-200 hover:bg-blue-600 hover:-translate-y-1 transition-all active:translate-y-0 flex items-center justify-center gap-3 overflow-hidden relative group"
-                  >
-                    <div className="absolute inset-0 bg-gradient-to-r from-blue-600 to-indigo-600 opacity-0 group-hover:opacity-100 transition-opacity" />
-                    <PlusCircle size={18} className="relative z-10" />
-                    <span className="relative z-10">Add to Current List</span>
-                  </button>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 relative">
+                    <button 
+                      onClick={handleAddToCart} 
+                      className="py-5 bg-slate-900 text-white rounded-2xl font-black text-xs uppercase tracking-[0.2em] shadow-xl shadow-slate-200 hover:bg-slate-800 hover:-translate-y-1 transition-all active:translate-y-0 flex items-center justify-center gap-3 overflow-hidden relative group"
+                    >
+                      <PlusCircle size={18} className="relative z-10" />
+                      <span className="relative z-10">Add to List</span>
+                    </button>
+
+                    <button 
+                      onClick={handleAddToCartAndGoToRemarks} 
+                      className="py-5 bg-blue-600 text-white rounded-2xl font-black text-xs uppercase tracking-[0.2em] shadow-xl shadow-blue-500/20 hover:bg-blue-700 hover:-translate-y-1 transition-all active:translate-y-0 flex items-center justify-center gap-3 overflow-hidden relative group"
+                    >
+                      <div className="absolute inset-0 bg-gradient-to-r from-blue-600 to-indigo-600 opacity-0 group-hover:opacity-100 transition-opacity" />
+                      <CheckCircle2 size={18} className="relative z-10" />
+                      <span className="relative z-10">Add & Next</span>
+                    </button>
+                    
+                    <AnimatePresence>
+                      {showAddedMsg && (
+                        <motion.div 
+                          initial={{ opacity: 0, y: 10, scale: 0.9 }}
+                          animate={{ opacity: 1, y: -40, scale: 1 }}
+                          exit={{ opacity: 0, y: -60, scale: 0.9 }}
+                          className="absolute left-1/4 -translate-x-1/2 whitespace-nowrap bg-emerald-600 text-white px-4 py-2 rounded-full text-[10px] font-black uppercase tracking-widest shadow-xl flex items-center gap-2 pointer-events-none z-50"
+                        >
+                          <CheckCircle2 size={12} /> Item Added
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
                 )}
+                <div className="pt-4 flex justify-between">
+                  <button 
+                    onClick={() => setActiveStep(2)}
+                    className="px-6 py-3 bg-slate-100 text-slate-600 rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-200 transition-all flex items-center gap-2"
+                  >
+                    <ArrowLeft size={14} /> Back
+                  </button>
+                  <button 
+                    onClick={() => setActiveStep(4)}
+                    className="px-6 py-3 bg-blue-600 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-blue-700 transition-all flex items-center gap-2"
+                  >
+                    Next Step <ArrowRight size={14} />
+                  </button>
+                </div>
               </motion.div>
 
               {/* Remarks Section */}
@@ -3396,6 +4889,14 @@ function SalesFormSection({
                   className="w-full px-8 py-6 bg-slate-50 border-2 border-transparent rounded-[32px] outline-none text-sm font-medium resize-none min-h-[120px] focus:bg-white focus:border-blue-500 focus:ring-8 focus:ring-blue-50 transition-all disabled:opacity-50"
                   placeholder="Type any special instructions or transaction notes here..."
                 />
+                <div className="pt-4 flex justify-start">
+                  <button 
+                    onClick={() => setActiveStep(3)}
+                    className="px-6 py-3 bg-slate-100 text-slate-600 rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-200 transition-all flex items-center gap-2"
+                  >
+                    <ArrowLeft size={14} /> Back
+                  </button>
+                </div>
               </motion.div>
             </div>
           </section>
@@ -3709,15 +5210,20 @@ function ItemMultiSelect({ options, selected, onChange }: { options: string[], s
               </div>
             </div>
             <div className="max-h-64 overflow-y-auto custom-scroll p-2 space-y-1">
-              <label className="flex items-center px-3 py-2 hover:bg-slate-50 rounded-xl cursor-pointer gap-3 transition-colors group">
-                <input 
-                  type="checkbox"
-                  checked={selected.length === 0}
-                  onChange={() => onChange([])}
-                  className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 w-4 h-4"
-                />
-                <span className="text-[10px] font-bold text-slate-600 group-hover:text-blue-600">Select All</span>
-              </label>
+              <div className="flex gap-1 p-1 mb-2">
+                <button 
+                  onClick={(e) => { e.stopPropagation(); onChange([]); }}
+                  className="flex-1 py-1.5 bg-slate-100 hover:bg-slate-200 text-[8px] font-black uppercase rounded-lg text-slate-500"
+                >
+                  Clear All
+                </button>
+                <button 
+                  onClick={(e) => { e.stopPropagation(); onChange(options); }}
+                  className="flex-1 py-1.5 bg-blue-50 hover:bg-blue-100 text-[8px] font-black uppercase rounded-lg text-blue-600"
+                >
+                  Select All
+                </button>
+              </div>
               {filteredOptions.map(opt => (
                 <label key={opt} className="flex items-center px-3 py-2 hover:bg-slate-50 rounded-xl cursor-pointer gap-3 transition-colors group">
                   <input 
@@ -3758,7 +5264,8 @@ function LedgerSection({
   setItemFilter,
   classFilter,
   setClassFilter,
-  exportCSV, 
+  exportLedger, 
+  importLedger,
   handlePrint, 
   deleteRecord,
   setEditingRecord,
@@ -3775,6 +5282,7 @@ function LedgerSection({
 }: any) {
   const [editingCell, setEditingCell] = useState<{ id: string, field: string } | null>(null);
   const [quickAdd, setQuickAdd] = useState({ name: '', studentClass: CLASSES[0], notes: '' });
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const itemNames = Object.keys(pricing);
 
   const toggleSelectAll = () => {
@@ -3803,100 +5311,217 @@ function LedgerSection({
             </h2>
             <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Managing {records.length} of {allRecords.length} records</p>
           </div>
-          <div className="flex flex-wrap gap-2 w-full lg:w-auto">
-            <button onClick={exportCSV} disabled={allRecords.length === 0} className="flex-1 lg:flex-none bg-emerald-50 text-emerald-700 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase hover:bg-emerald-100 transition-all font-mono flex items-center justify-center gap-2 border border-emerald-100">
-              <FileDown size={14} /> EXPORT CSV
+          <div className="flex flex-wrap items-center gap-2 w-full lg:w-auto mt-4 lg:mt-0">
+            <div className="relative group/export flex-1 sm:flex-none">
+              <button className="w-full bg-emerald-50 text-emerald-700 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase hover:bg-emerald-100 transition-all font-mono flex items-center justify-center gap-2 border border-emerald-100">
+                <FileDown size={14} /> <span className="hidden sm:inline">EXPORT</span><span className="sm:hidden">EX</span>
+              </button>
+              <div className="absolute right-0 top-full mt-2 w-48 bg-white border border-slate-200 rounded-xl shadow-xl opacity-0 invisible group-hover/export:opacity-100 group-hover/export:visible transition-all z-50">
+                <button onClick={() => exportLedger('xlsx')} className="w-full text-left px-4 py-4 text-[10px] font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-2 border-b border-slate-50">
+                  <FileSpreadsheet size={16} className="text-emerald-500" /> Excel (.xlsx)
+                </button>
+                <button onClick={() => exportLedger('csv')} className="w-full text-left px-4 py-4 text-[10px] font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-2">
+                  <FileSpreadsheet size={16} className="text-blue-500" /> CSV (.csv)
+                </button>
+              </div>
+            </div>
+
+            <input 
+              type="file" 
+              ref={fileInputRef} 
+              className="hidden" 
+              accept=".xlsx,.xls,.csv" 
+              onChange={importLedger} 
+            />
+            <button 
+              onClick={() => fileInputRef.current?.click()}
+              className="flex-1 sm:flex-none bg-indigo-50 text-indigo-700 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase hover:bg-indigo-100 transition-all font-mono flex items-center justify-center gap-2 border border-indigo-100"
+            >
+              <Upload size={14} /> <span className="hidden sm:inline">IMPORT</span><span className="sm:hidden">IM</span>
             </button>
-            <button onClick={handlePrint} disabled={allRecords.length === 0} className="flex-1 lg:flex-none bg-blue-50 text-blue-600 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase hover:bg-blue-100 transition-all font-mono flex items-center justify-center gap-2 border border-blue-100">
-              <Printer size={14} /> PRINT PDF
+
+            <button onClick={handlePrint} disabled={allRecords.length === 0} className="flex-1 sm:flex-none bg-blue-50 text-blue-600 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase hover:bg-blue-100 transition-all font-mono flex items-center justify-center gap-2 border border-blue-100">
+              <Printer size={14} /> <span className="hidden sm:inline">PRINT</span><span className="sm:hidden">PDF</span>
             </button>
           </div>
         </div>
 
         {/* Filters Row */}
-        <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 p-4 bg-slate-50/50 rounded-2xl border border-slate-100">
-          <div className="relative group">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
-            <input 
-              type="text" 
-              placeholder="Search..." 
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-xl outline-none text-[10px] font-bold focus:border-blue-500 transition-all shadow-sm"
-            />
-          </div>
-
-          <div className="flex gap-2">
-            <div className="relative flex-1">
-              <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" size={12} />
+        <div className="mt-6 flex flex-col gap-4 p-4 bg-slate-50/50 rounded-2xl border border-slate-100">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-3">
+            <div className="relative group lg:col-span-3">
+              <label className="text-[9px] font-black uppercase text-slate-400 mb-1 block px-1">Search Records</label>
+              <Search className="absolute left-3 top-7 text-slate-400" size={14} />
               <input 
-                type="date"
-                value={dateStart}
-                onChange={(e) => setDateStart(e.target.value)}
-                className="w-full pl-8 pr-2 py-2 bg-white border border-slate-200 rounded-xl outline-none text-[10px] font-bold focus:border-blue-500 transition-all shadow-sm"
+                type="text" 
+                placeholder="Student Name..." 
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full h-9 pl-9 pr-4 bg-white border border-slate-200 rounded-xl outline-none text-[10px] font-bold focus:border-blue-500 transition-all shadow-sm"
               />
             </div>
-            <div className="relative flex-1">
-              <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" size={12} />
-              <input 
-                type="date"
-                value={dateEnd}
-                onChange={(e) => setDateEnd(e.target.value)}
-                className="w-full pl-8 pr-2 py-2 bg-white border border-slate-200 rounded-xl outline-none text-[10px] font-bold focus:border-blue-500 transition-all shadow-sm"
+
+            <div className="space-y-1 lg:col-span-3">
+              <label className="text-[9px] font-black uppercase text-slate-400 mb-1 block px-1">Date Range</label>
+              <div className="flex gap-2">
+                <div className="relative flex-1">
+                  <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" size={12} />
+                  <input 
+                    type="date"
+                    value={dateStart}
+                    onChange={(e) => setDateStart(e.target.value)}
+                    className="w-full h-9 pl-8 pr-2 bg-white border border-slate-200 rounded-xl outline-none text-[10px] font-bold focus:border-blue-500 transition-all shadow-sm text-center sm:text-left"
+                  />
+                </div>
+                <div className="relative flex-1">
+                  <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" size={12} />
+                  <input 
+                    type="date"
+                    value={dateEnd}
+                    onChange={(e) => setDateEnd(e.target.value)}
+                    className="w-full h-9 pl-8 pr-2 bg-white border border-slate-200 rounded-xl outline-none text-[10px] font-bold focus:border-blue-500 transition-all shadow-sm text-center sm:text-left"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="relative lg:col-span-2">
+              <label className="text-[9px] font-black uppercase text-slate-400 mb-1 block px-1">Payment</label>
+              <CreditCard className="absolute left-3 top-7 text-slate-400 pointer-events-none" size={14} />
+              <select 
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                className="w-full h-9 pl-9 pr-4 bg-white border border-slate-200 rounded-xl outline-none text-[10px] font-bold appearance-none focus:border-blue-500 transition-all shadow-sm"
+              >
+                <option value="All">All Modes</option>
+                <option value="UPI">UPI</option>
+                <option value="Cash">Cash</option>
+                <option value="Pending">Pending</option>
+              </select>
+              <ChevronDown className="absolute right-3 top-7 text-slate-300 pointer-events-none" size={12} />
+            </div>
+
+            <div className="relative lg:col-span-2">
+              <label className="text-[9px] font-black uppercase text-slate-400 mb-1 block px-1">Items Sold</label>
+              <Package className="absolute left-3 top-7 text-slate-400 pointer-events-none z-10" size={14} />
+              <ItemMultiSelect 
+                options={itemNames} 
+                selected={itemFilter} 
+                onChange={setItemFilter} 
               />
+            </div>
+
+            <div className="relative lg:col-span-2">
+              <label className="text-[9px] font-black uppercase text-slate-400 mb-1 block px-1">Classes</label>
+              <UserCircle className="absolute left-3 top-7 text-slate-400 pointer-events-none" size={14} />
+              <select 
+                value={classFilter}
+                onChange={(e) => setClassFilter(e.target.value)}
+                className="w-full h-9 pl-9 pr-4 bg-white border border-slate-200 rounded-xl outline-none text-[10px] font-bold appearance-none focus:border-blue-500 transition-all shadow-sm"
+              >
+                <option value="All">All Classes</option>
+                {CLASSES.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+              <ChevronDown className="absolute right-3 top-7 text-slate-300 pointer-events-none" size={12} />
             </div>
           </div>
 
-          <div className="relative">
-            <CreditCard className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" size={14} />
-            <select 
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
-              className="w-full pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-xl outline-none text-[10px] font-bold appearance-none focus:border-blue-500 transition-all shadow-sm"
-            >
-              <option value="All">All Payments</option>
-              <option value="UPI">UPI</option>
-              <option value="Cash">Cash</option>
-              <option value="Pending">Pending</option>
-            </select>
-            <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-300 pointer-events-none" size={12} />
+          <div className="flex flex-wrap gap-2 items-center border-t border-slate-100 pt-3">
+             <div className="flex flex-wrap gap-2 flex-1">
+                <span className="text-[8px] font-black uppercase text-slate-400 tracking-tighter self-center mr-2">Quick Dates:</span>
+                {[
+                  { label: 'Today', getValue: () => {
+                    const today = new Date().toISOString().split('T')[0];
+                    return { start: today, end: today };
+                  }},
+                  { label: 'Yesterday', getValue: () => {
+                    const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+                    return { start: yesterday, end: yesterday };
+                  }},
+                  { label: 'This Week', getValue: () => {
+                    const curr = new Date();
+                    const first = curr.getDate() - curr.getDay() + (curr.getDay() === 0 ? -6 : 1); // Monday
+                    const firstday = new Date(curr.setDate(first)).toISOString().split('T')[0];
+                    const lastday = new Date(curr.setDate(first + 6)).toISOString().split('T')[0];
+                    return { start: firstday, end: lastday };
+                  }},
+                  { label: 'This Month', getValue: () => {
+                    const date = new Date();
+                    const firstDay = new Date(date.getFullYear(), date.getMonth(), 1).toISOString().split('T')[0];
+                    const lastDay = new Date(date.getFullYear(), date.getMonth() + 1, 0).toISOString().split('T')[0];
+                    return { start: firstDay, end: lastDay };
+                  }}
+                ].map(range => (
+                  <button 
+                    key={range.label}
+                    onClick={() => {
+                      const { start, end } = range.getValue();
+                      setDateStart(start);
+                      setDateEnd(end);
+                    }}
+                    className={`px-3 py-1 rounded-full text-[9px] font-bold uppercase transition-all border ${
+                      dateStart === range.getValue().start && dateEnd === range.getValue().end
+                      ? 'bg-blue-600 text-white border-blue-600 shadow-sm shadow-blue-200' 
+                      : 'bg-white text-slate-500 border-slate-200 hover:border-blue-400 hover:text-blue-600'
+                    }`}
+                  >
+                    {range.label}
+                  </button>
+                ))}
+             </div>
+             
+             <button 
+                onClick={() => {
+                  setSearchQuery('');
+                  setStatusFilter('All');
+                  setDateStart('');
+                  setDateEnd('');
+                  setItemFilter([]);
+                  setClassFilter('All');
+                }}
+                className="h-7 px-3 bg-slate-200/50 text-slate-600 rounded-lg text-[9px] font-black uppercase hover:bg-slate-200 transition-all flex items-center justify-center gap-2"
+              >
+                <X size={12} /> Reset
+              </button>
           </div>
 
-          <div className="relative">
-            <Package className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none z-10" size={14} />
-            <ItemMultiSelect 
-              options={itemNames} 
-              selected={itemFilter} 
-              onChange={setItemFilter} 
-            />
-          </div>
-
-          <div className="relative">
-            <UserCircle className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" size={14} />
-            <select 
-              value={classFilter}
-              onChange={(e) => setClassFilter(e.target.value)}
-              className="w-full pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-xl outline-none text-[10px] font-bold appearance-none focus:border-blue-500 transition-all shadow-sm"
-            >
-              <option value="All">All Classes</option>
-              {CLASSES.map(c => <option key={c} value={c}>{c}</option>)}
-            </select>
-            <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-300 pointer-events-none" size={12} />
-          </div>
-
-          <button 
-            onClick={() => {
-              setSearchQuery('');
-              setStatusFilter('All');
-              setDateStart('');
-              setDateEnd('');
-              setItemFilter([]);
-              setClassFilter('All');
-            }}
-            className="px-4 py-2 bg-white border border-slate-200 rounded-xl text-[10px] font-black uppercase hover:bg-slate-100 transition-all text-slate-500 shadow-sm"
-          >
-            Reset
-          </button>
+          {/* Active Filter Chips */}
+          <AnimatePresence>
+            {(searchQuery || statusFilter !== 'All' || dateStart || dateEnd || itemFilter.length > 0 || classFilter !== 'All') && (
+              <motion.div 
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: 'auto', opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                className="flex flex-wrap gap-2 pt-2 border-t border-slate-100 overflow-hidden"
+              >
+                {searchQuery && (
+                  <div className="bg-blue-50 text-blue-600 px-2 py-0.5 rounded-lg text-[8px] font-black flex items-center gap-1 border border-blue-100">
+                    SEARCH: {searchQuery} <X size={10} className="cursor-pointer" onClick={() => setSearchQuery('')} />
+                  </div>
+                )}
+                {statusFilter !== 'All' && (
+                  <div className="bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-lg text-[8px] font-black flex items-center gap-1 border border-indigo-100">
+                    PAYMENT: {statusFilter} <X size={10} className="cursor-pointer" onClick={() => setStatusFilter('All')} />
+                  </div>
+                )}
+                {(dateStart || dateEnd) && (
+                  <div className="bg-emerald-50 text-emerald-600 px-2 py-0.5 rounded-lg text-[8px] font-black flex items-center gap-1 border border-emerald-100">
+                    DATE: {dateStart || '...'} to {dateEnd || '...'} <X size={10} className="cursor-pointer" onClick={() => { setDateStart(''); setDateEnd(''); }} />
+                  </div>
+                )}
+                {classFilter !== 'All' && (
+                  <div className="bg-amber-50 text-amber-600 px-2 py-0.5 rounded-lg text-[8px] font-black flex items-center gap-1 border border-amber-100">
+                    CLASS: {classFilter} <X size={10} className="cursor-pointer" onClick={() => setClassFilter('All')} />
+                  </div>
+                )}
+                {itemFilter.map(item => (
+                  <div key={item} className="bg-slate-100 text-slate-600 px-2 py-0.5 rounded-lg text-[8px] font-black flex items-center gap-1 border border-slate-200">
+                    ITEM: {item} <X size={10} className="cursor-pointer" onClick={() => setItemFilter(itemFilter.filter(i => i !== item))} />
+                  </div>
+                ))}
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
       </div>
       
@@ -3918,7 +5543,8 @@ function LedgerSection({
           <thead className="sticky top-0 z-30 bg-slate-50 border-b border-slate-200 print:static print:bg-white text-[9px] uppercase tracking-widest font-black">
             {/* Top Header Row for Items */}
             <tr className="text-slate-400">
-              <th rowSpan={2} className="sticky left-0 z-40 bg-slate-50 px-4 py-4 border-b border-r border-slate-100 min-w-[50px] print:hidden">
+              <th rowSpan={2} className="sticky left-0 z-40 bg-slate-50 px-4 py-4 border-b border-r border-slate-100 min-w-[60px] shadow-[2px_0_5px_rgba(0,0,0,0.05)]">Sr.</th>
+              <th rowSpan={2} className="px-4 py-4 border-b border-r border-slate-100 min-w-[50px] print:hidden">
                 {can('delete') && (
                   <input 
                     type="checkbox" 
@@ -3928,9 +5554,8 @@ function LedgerSection({
                   />
                 )}
               </th>
-              <th rowSpan={2} className="sticky left-[50px] z-40 bg-slate-50 px-4 py-4 border-b border-r border-slate-100 min-w-[50px]">Sr.</th>
-              <th rowSpan={2} className="sticky left-[100px] z-40 bg-slate-50 px-4 py-4 border-b border-r border-slate-100 min-w-[100px]">Date</th>
-              <th rowSpan={2} className="sticky left-[200px] z-40 bg-slate-50 px-6 py-4 border-b border-r-[2px] border-slate-200 min-w-[180px] shadow-[2px_0_5px_rgba(0,0,0,0.05)]">Student & Notes</th>
+              <th rowSpan={2} className="px-4 py-4 border-b border-r border-slate-100 min-w-[100px]">Date</th>
+              <th rowSpan={2} className="px-6 py-4 border-b border-r-[2px] border-slate-200 min-w-[180px]">Student & Notes</th>
               
               {itemNames.map(name => (
                 <th key={name} colSpan={3} className="px-6 py-4 border-b border-r border-slate-200 bg-blue-50/50 text-blue-600 text-center">
@@ -3970,10 +5595,10 @@ function LedgerSection({
             {/* Quick Add Row */}
             {can('add') && (
               <tr className="bg-blue-50/20 group/quickadd print:hidden">
-                <td className="sticky left-0 z-20 bg-blue-50/30 px-4 py-3 border-r border-slate-50"></td>
-                <td className="sticky left-[50px] z-20 bg-blue-50/30 px-4 py-3 border-r border-slate-50 font-mono text-[10px] text-blue-400 font-bold italic">NEW</td>
-                <td className="sticky left-[100px] z-20 bg-blue-50/30 px-4 py-3 border-r border-slate-50 font-mono text-[10px] text-slate-400 italic">Auto</td>
-                <td className="sticky left-[200px] z-20 bg-blue-50/30 px-6 py-3 border-r-[2px] border-slate-100 shadow-[2px_0_5px_rgba(0,0,0,0.02)]">
+                <td className="sticky left-0 z-20 bg-blue-50 px-4 py-3 border-r border-slate-100 shadow-[2px_0_5px_rgba(0,0,0,0.02)] font-mono text-[10px] text-blue-500 font-bold italic">NEW</td>
+                <td className="px-4 py-3 border-r border-slate-50 bg-blue-50/30"></td>
+                <td className="px-4 py-3 border-r border-slate-50 bg-blue-50/30 font-mono text-[10px] text-slate-400 italic">Auto</td>
+                <td className="px-6 py-3 border-r-[2px] border-slate-100">
                   <div className="space-y-1">
                     <input 
                       type="text"
@@ -4040,9 +5665,19 @@ function LedgerSection({
               </tr>
             )}
 
-            {records.map((rec: any) => (
-              <tr key={rec.id} className={`hover:bg-slate-50 transition-colors text-xs print:hover:bg-transparent group/row ${selectedRecordIds.includes(rec.id) ? 'bg-blue-50/30' : ''}`}>
-                <td className="sticky left-0 z-10 bg-inherit px-4 py-4 border-r border-slate-50 print:hidden text-center group-hover/row:bg-slate-100">
+            {records.map((rec: any, index: number) => (
+              <tr 
+                key={rec.id} 
+                className={`transition-colors text-xs print:hover:bg-transparent group/row ${
+                  selectedRecordIds.includes(rec.id) 
+                    ? 'bg-blue-50/50' 
+                    : index % 2 === 0 
+                      ? 'bg-white hover:bg-slate-50' 
+                      : 'bg-slate-50/40 hover:bg-slate-100/60'
+                }`}
+              >
+                <td className="sticky left-0 z-10 bg-inherit px-4 py-4 font-mono font-bold text-slate-400 border-r border-slate-100 print:text-black shadow-[2px_0_5px_rgba(0,0,0,0.02)] transition-colors">#{rec.srNo}</td>
+                <td className="bg-inherit px-4 py-4 border-r border-slate-50 print:hidden text-center transition-colors">
                   {can('delete') && (
                     <input 
                       type="checkbox" 
@@ -4052,9 +5687,8 @@ function LedgerSection({
                     />
                   )}
                 </td>
-                <td className="sticky left-[50px] z-10 bg-inherit px-4 py-4 font-mono font-bold text-slate-400 border-r border-slate-50 print:text-black group-hover/row:bg-slate-100">#{rec.srNo}</td>
-                <td className="sticky left-[100px] z-10 bg-inherit px-4 py-4 text-slate-400 font-mono border-r border-slate-50 print:text-black group-hover/row:bg-slate-100">{rec.date}</td>
-                <td className="sticky left-[200px] z-10 bg-inherit px-6 py-4 border-r-[2px] border-slate-100 shadow-[2px_0_5px_rgba(0,0,0,0.02)] group-hover/row:bg-slate-100">
+                <td className="bg-inherit px-4 py-4 text-slate-400 font-mono border-r border-slate-50 print:text-black transition-colors">{rec.date}</td>
+                <td className="bg-inherit px-6 py-4 border-r-[2px] border-slate-100 transition-colors">
                   {can('edit') && editingCell?.id === rec.id && editingCell?.field === 'name' ? (
                     <input 
                       autoFocus
@@ -4359,6 +5993,59 @@ function ConfirmDialog({ isOpen, title, message, onConfirm, onCancel, type = 'da
             <button onClick={onCancel} className="flex-1 px-6 py-3 bg-slate-100 text-slate-600 rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-200 transition-all">Cancel</button>
             <button onClick={() => { onConfirm(); onCancel(); }} className={`flex-1 px-6 py-3 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest transition-all shadow-lg ${type === 'danger' ? 'bg-red-600 hover:bg-red-700 shadow-red-500/20' : 'bg-blue-600 hover:bg-blue-700 shadow-blue-500/20'}`}>Confirm</button>
           </div>
+        </div>
+      </motion.div>
+    </div>
+  );
+}
+
+function ImportResultModal({ result, onClose }: { result: any; onClose: () => void }) {
+  if (!result) return null;
+  return (
+    <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+      <motion.div 
+        initial={{ scale: 0.95, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        className="bg-white rounded-3xl shadow-2xl max-w-2xl w-full overflow-hidden font-sans flex flex-col max-h-[90vh]"
+      >
+        <div className="p-8 border-b border-slate-100 flex items-center justify-between">
+          <div className="flex items-center gap-4">
+             <div className="w-12 h-12 rounded-2xl bg-amber-50 text-amber-500 flex items-center justify-center">
+                <AlertCircle size={24} />
+             </div>
+             <div>
+                <h3 className="text-xl font-bold text-slate-800">Import Summary</h3>
+                <p className="text-sm text-slate-500 font-medium">Successfully imported {result.successCount} rows, {result.errors.length} failed.</p>
+             </div>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-xl transition-all">
+            <X size={20} className="text-slate-400" />
+          </button>
+        </div>
+        <div className="overflow-y-auto p-4 flex-1">
+           <table className="w-full text-left border-collapse">
+              <thead>
+                 <tr className="border-b border-slate-50">
+                    <th className="p-3 text-[10px] font-black uppercase text-slate-400">Row</th>
+                    <th className="p-3 text-[10px] font-black uppercase text-slate-400">Item</th>
+                    <th className="p-3 text-[10px] font-black uppercase text-slate-400">Size</th>
+                    <th className="p-3 text-[10px] font-black uppercase text-slate-400 text-red-500">Reason</th>
+                 </tr>
+              </thead>
+              <tbody>
+                 {result.errors.map((err: any, idx: number) => (
+                    <tr key={idx} className="border-b border-slate-50 hover:bg-slate-50/50 transition-colors">
+                       <td className="p-3 text-xs font-bold text-slate-500">#{err.row}</td>
+                       <td className="p-3 text-xs font-bold text-slate-800">{err.item}</td>
+                       <td className="p-3 text-xs font-bold text-slate-800">{err.size}</td>
+                       <td className="p-3 text-xs font-bold text-red-500">{err.reason}</td>
+                    </tr>
+                 ))}
+              </tbody>
+           </table>
+        </div>
+        <div className="p-6 bg-slate-50 flex justify-end">
+           <button onClick={onClose} className="px-8 py-3 bg-white text-slate-900 border border-slate-200 rounded-2xl font-black text-[10px] uppercase tracking-widest hover:border-slate-300 transition-all shadow-sm">Close</button>
         </div>
       </motion.div>
     </div>

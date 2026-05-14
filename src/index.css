@@ -16,6 +16,8 @@
     body {
       background: white !important;
       color: black !important;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
     }
 
     .print\:hidden {
@@ -45,6 +47,34 @@
     .print\:overflow-visible {
       overflow: visible !important;
     }
+
+    .print\:text-black {
+      color: black !important;
+    }
+
+    table {
+      width: 100% !important;
+      border-collapse: collapse !important;
+    }
+
+    th, td {
+      border: 1px solid #e2e8f0 !important;
+      padding: 4px 8px !important;
+      font-size: 10px !important;
+    }
+
+    thead {
+      display: table-header-group;
+    }
+
+    tr {
+      page-break-inside: avoid;
+    }
+
+    .bg-blue-50 { background-color: #eff6ff !important; }
+    .bg-slate-50 { background-color: #f8fafc !important; }
+    .text-blue-600 { color: #2563eb !important; }
+    .text-slate-400 { color: #94a3b8 !important; }
   }
 }
 

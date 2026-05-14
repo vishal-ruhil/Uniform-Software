@@ -7,6 +7,8 @@ export interface User {
   password?: string;
   role: UserRole;
   createdAt: string;
+  photoURL?: string;
+  emailVerified?: boolean;
 }
 
 export interface StockInfo {
