@@ -51,11 +51,17 @@ import {
   Users,
   Upload,
   CloudLightning,
-  Sparkles,
   CheckCircle,
   ExternalLink,
   RefreshCw,
-  Share
+  Share,
+  PackagePlus,
+  SearchX,
+  ShoppingBag,
+  ArrowUp,
+  PackageCheck,
+  Edit2,
+  GripVertical
 } from 'lucide-react';
 import { 
   LineChart, 
@@ -71,7 +77,7 @@ import {
   Pie,
   Cell
 } from 'recharts';
-import { motion, AnimatePresence, Reorder } from 'motion/react';
+import { motion, AnimatePresence, Reorder, useDragControls } from 'motion/react';
 import * as XLSX from 'xlsx';
 import { initializeApp } from 'firebase/app';
 import { 
@@ -252,8 +258,6 @@ export default function App() {
   const [dateStart, setDateStart] = useState('');
   const [dateEnd, setDateEnd] = useState('');
   const [msg, setMsg] = useState<{ type: 'success' | 'error', text: string } | null>(null);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [isSummarizing, setIsSummarizing] = useState(false);
   const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' }>({ 
     key: 'srNo', 
     direction: 'desc' 
@@ -264,75 +268,6 @@ export default function App() {
       key,
       direction: prev.key === key && prev.direction === 'desc' ? 'asc' : 'desc'
     }));
-  };
-
-  const summarizeNotes = async () => {
-    if (!generalNotes.trim()) return;
-    setIsSummarizing(true);
-    try {
-      const response = await fetch('/api/summarize-notes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ notes: generalNotes }),
-      });
-
-      if (!response.ok) throw new Error('Failed to summarize notes');
-      const { summary } = await response.json();
-      setGeneralNotes(summary);
-      setMsg({ type: 'success', text: 'Notes summarized by Gemini AI' });
-      setTimeout(() => setMsg(null), 3000);
-    } catch (error: any) {
-      console.error('Gemini Summary error:', error);
-      setMsg({ type: 'error', text: 'Summarization Failed: ' + error.message });
-      setTimeout(() => setMsg(null), 4000);
-    } finally {
-      setIsSummarizing(false);
-    }
-  };
-
-  const importFromSpreadsheet = async (file: File) => {
-    setIsAnalyzing(true);
-    try {
-      const data = await file.arrayBuffer();
-      const workbook = XLSX.read(data, { type: 'array' });
-      const firstSheetName = workbook.SheetNames[0];
-      const worksheet = workbook.Sheets[firstSheetName];
-      const jsonData = XLSX.utils.sheet_to_json(worksheet);
-      
-      const response = await fetch('/api/analyze-spreadsheet', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          data: JSON.stringify(jsonData),
-          pricingContext: pricing,
-        }),
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Failed to analyze spreadsheet');
-      }
-      
-      const mappedItems = await response.json();
-      
-      const newItems = mappedItems.map((item: any) => ({
-        id: crypto.randomUUID(),
-        ...item,
-        notes: item.notes || 'Imported via Gemini AI'
-      }));
-      
-      setCart((prev: any) => [...prev, ...newItems]);
-      setMsg({ type: 'success', text: `Gemini analyzed and added ${newItems.length} items to your list.` });
-      setTimeout(() => setMsg(null), 4000);
-    } catch (error: any) {
-      console.error('Gemini Import error:', error);
-      setMsg({ type: 'error', text: 'Gemini Analysis Failed: ' + error.message });
-      setTimeout(() => setMsg(null), 4000);
-    } finally {
-      setIsAnalyzing(false);
-    }
   };
 
   const [itemFilter, setItemFilter] = useState<string[]>([]);
@@ -579,6 +514,7 @@ export default function App() {
   const dashboardData = useMemo(() => {
     // Sales by Date
     const dateMap: Record<string, { total: number, UPI: number, Cash: number, Pending: number }> = {};
+    const monthMap: Record<string, number> = {};
     const paymentMap: Record<string, number> = { UPI: 0, Cash: 0, Pending: 0 };
     const itemMap: Record<string, Record<string, number>> = {}; // item -> size -> qty
 
@@ -592,6 +528,11 @@ export default function App() {
       else if (r.paymentMode === 'Cash') dateMap[r.date].Cash += r.totalAmount;
       else if (r.paymentMode === 'Pending') dateMap[r.date].Pending += r.totalAmount;
       
+      // Monthly stats
+      const [day, month, year] = r.date.split('/');
+      const monthKey = `${month}/${year}`;
+      monthMap[monthKey] = (monthMap[monthKey] || 0) + r.totalAmount;
+
       // Payment stats
       paymentMap[r.paymentMode] = (paymentMap[r.paymentMode] || 0) + 1;
 
@@ -610,8 +551,20 @@ export default function App() {
         Cash: stats.Cash,
         Pending: stats.Pending
       }))
-      .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
-      .slice(-10); // Last 10 days
+      .sort((a, b) => {
+        const [d1, m1, y1] = a.date.split('/');
+        const [d2, m2, y2] = b.date.split('/');
+        return new Date(`${y1}-${m1}-${d1}`).getTime() - new Date(`${y2}-${m2}-${d2}`).getTime();
+      })
+      .slice(-14); // Last 14 entries for better trend
+
+    const monthlyTrends = Object.entries(monthMap)
+      .map(([month, amount]) => ({ month, amount }))
+      .sort((a, b) => {
+        const [m1, y1] = a.month.split('/');
+        const [m2, y2] = b.month.split('/');
+        return new Date(`${y1}-${m1}-01`).getTime() - new Date(`${y2}-${m2}-01`).getTime();
+      });
 
     const paymentData = Object.entries(paymentMap).map(([name, value]) => ({ name, value }));
     
@@ -619,7 +572,7 @@ export default function App() {
       name,
       total: Object.values(sizes).reduce((a, b) => a + b, 0),
       sizes: Object.entries(sizes).map(([size, qty]) => ({ size, qty }))
-    })).sort((a, b) => b.total - a.total);
+    })).sort((a, b) => b.total - a.total).slice(0, 8); // Top 8 items
 
     const lowStockItems: any[] = [];
     Object.entries(pricing).forEach(([item, sizes]) => {
@@ -634,7 +587,7 @@ export default function App() {
       }
     });
 
-    return { timeSeries, paymentData, itemAnalysis, lowStockItems };
+    return { timeSeries, monthlyTrends, paymentData, itemAnalysis, lowStockItems };
   }, [records, pricing]);
 
   const stats = useMemo(() => {
@@ -649,7 +602,12 @@ export default function App() {
     return { totalSales, pendingAmount, paidAmount };
   }, [records]);
 
-  // --- Handlers ---
+  // Handlers
+  const getNextSrNo = () => {
+    if (records.length === 0) return 1;
+    return Math.max(...records.map(r => Number(r.srNo) || 0)) + 1;
+  };
+
   const handleEmailAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginLoading(true);
@@ -792,6 +750,47 @@ export default function App() {
         ...pricing[item],
         [size]: { ...pricing[item][size], minStock: value }
       }
+    };
+    setPricing(next);
+    updatePricingInCloud(next);
+  };
+
+  const handleMove = (item: string, direction: 'left' | 'right') => {
+    const index = itemOrder.indexOf(item);
+    if (index === -1) return;
+    
+    const newOrder = [...itemOrder];
+    if (direction === 'left' && index > 0) {
+      [newOrder[index], newOrder[index - 1]] = [newOrder[index - 1], newOrder[index]];
+    } else if (direction === 'right' && index < itemOrder.length - 1) {
+      [newOrder[index], newOrder[index + 1]] = [newOrder[index + 1], newOrder[index]];
+    }
+    updateItemOrder(newOrder);
+  };
+
+  const handleMoveSize = (itemName: string, sizeName: string, direction: 'up' | 'down') => {
+    const itemSizes = pricing[itemName];
+    if (!itemSizes) return;
+    
+    const sizes = Object.keys(itemSizes);
+    const idx = sizes.indexOf(sizeName);
+    if (idx === -1) return;
+    
+    const newSizesList = [...sizes];
+    if (direction === 'up' && idx > 0) {
+      [newSizesList[idx], newSizesList[idx - 1]] = [newSizesList[idx - 1], newSizesList[idx]];
+    } else if (direction === 'down' && idx < newSizesList.length - 1) {
+      [newSizesList[idx], newSizesList[idx + 1]] = [newSizesList[idx + 1], newSizesList[idx]];
+    }
+    
+    const updatedSizes: any = {};
+    newSizesList.forEach(s => {
+      updatedSizes[s] = itemSizes[s];
+    });
+    
+    const next = {
+      ...pricing,
+      [itemName]: updatedSizes
     };
     setPricing(next);
     updatePricingInCloud(next);
@@ -940,7 +939,8 @@ export default function App() {
 
   const exportPricingExcel = () => {
     const rows: any[] = [];
-    Object.entries(pricing).forEach(([item, sizes]: [string, any]) => {
+    itemOrder.forEach((item: string) => {
+      const sizes = pricing[item] || {};
       Object.entries(sizes).forEach(([size, info]: [string, any]) => {
         rows.push({
           "Item": item,
@@ -960,9 +960,23 @@ export default function App() {
     setTimeout(() => setMsg(null), 3000);
   };
 
+  const downloadPricingTemplate = () => {
+    const template = [
+      { "Item": "EXAMPLE_ITEM", "Size": "M", "Price": 500, "Stock": 50, "Min Stock": 10 },
+      { "Item": "EXAMPLE_ITEM", "Size": "L", "Price": 550, "Stock": 30, "Min Stock": 5 }
+    ];
+    const worksheet = XLSX.utils.json_to_sheet(template);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Template");
+    XLSX.writeFile(workbook, "Pricing_Import_Template.xlsx");
+    setMsg({ text: 'Template downloaded. Please follow the format strictly.', type: 'info' });
+    setTimeout(() => setMsg(null), 4000);
+  };
+
   const [importResult, setImportResult] = useState<{
+    type: 'pricing' | 'ledger';
     successCount: number;
-    errors: { row: number; item: string; size: string; reason: string }[];
+    errors: { row: number; identifier: string; subIdentifier?: string; reason: string; rawData?: any }[];
   } | null>(null);
 
   const importPricingExcel = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -972,14 +986,14 @@ export default function App() {
     const reader = new FileReader();
     reader.onload = (evt) => {
       try {
-        const bstr = evt.target?.result;
-        const workbook = XLSX.read(bstr, { type: 'binary' });
+        const dataBuffer = evt.target?.result as ArrayBuffer;
+        const workbook = XLSX.read(dataBuffer, { type: 'buffer' });
         const sheetName = workbook.SheetNames[0];
         const worksheet = workbook.Sheets[sheetName];
         const data = XLSX.utils.sheet_to_json(worksheet) as any[];
 
         const nextPricing: any = { ...pricing };
-        const errors: { row: number; item: string; size: string; reason: string }[] = [];
+        const errors: any[] = [];
         let successCount = 0;
 
         data.forEach((row: any, index: number) => {
@@ -992,11 +1006,11 @@ export default function App() {
           const rowNum = index + 2; // +1 for 0-indexed, +1 for header row
 
           if (!item) {
-            errors.push({ row: rowNum, item: "N/A", size: size || "N/A", reason: "Missing Item name" });
+            errors.push({ row: rowNum, identifier: "N/A", subIdentifier: size || "N/A", reason: "Missing Item name", rawData: row });
             return;
           }
           if (!size) {
-            errors.push({ row: rowNum, item: item, size: "N/A", reason: "Missing Size" });
+            errors.push({ row: rowNum, identifier: item, subIdentifier: "N/A", reason: "Missing Size", rawData: row });
             return;
           }
 
@@ -1006,15 +1020,15 @@ export default function App() {
 
           let hasError = false;
           if (priceRaw !== undefined && isNaN(price)) {
-            errors.push({ row: rowNum, item, size, reason: `Invalid Price: ${priceRaw}` });
+            errors.push({ row: rowNum, identifier: item, subIdentifier: size, reason: `Invalid Price: ${priceRaw}`, rawData: row });
             hasError = true;
           }
           if (stockRaw !== undefined && isNaN(stock)) {
-            errors.push({ row: rowNum, item, size, reason: `Invalid Stock: ${stockRaw}` });
+            errors.push({ row: rowNum, identifier: item, subIdentifier: size, reason: `Invalid Stock: ${stockRaw}`, rawData: row });
             hasError = true;
           }
           if (minStockRaw !== undefined && isNaN(minStock)) {
-            errors.push({ row: rowNum, item, size, reason: `Invalid Min Stock: ${minStockRaw}` });
+            errors.push({ row: rowNum, identifier: item, subIdentifier: size, reason: `Invalid Min Stock: ${minStockRaw}`, rawData: row });
             hasError = true;
           }
 
@@ -1039,7 +1053,7 @@ export default function App() {
         }
 
         if (errors.length > 0) {
-          setImportResult({ successCount, errors });
+          setImportResult({ type: 'pricing', successCount, errors });
           setMsg({ text: `Import completed with ${errors.length} errors.`, type: 'error' });
         } else {
           setImportResult(null);
@@ -1052,7 +1066,7 @@ export default function App() {
         setTimeout(() => setMsg(null), 3000);
       }
     };
-    reader.readAsBinaryString(file);
+    reader.readAsArrayBuffer(file);
     e.target.value = '';
   };
 
@@ -1237,9 +1251,11 @@ export default function App() {
     const timestamp = new Date().toISOString();
     const displayDate = new Date(transactionDate).toLocaleDateString('en-IN');
 
+    const finalSrNo = getNextSrNo();
+
     const newRecord: SaleRecord = {
       id: crypto.randomUUID(),
-      srNo: srNo,
+      srNo: finalSrNo,
       name: studentName,
       studentClass: studentClass,
       items: cart,
@@ -1512,7 +1528,7 @@ export default function App() {
       return;
     }
 
-    const itemNames = Object.keys(pricing);
+    const itemNames = itemOrder && itemOrder.length > 0 ? itemOrder : Object.keys(pricing);
     
     // Create data rows
     const dataRows = filteredRecords.map(r => {
@@ -1575,8 +1591,8 @@ export default function App() {
     const reader = new FileReader();
     reader.onload = async (evt) => {
       try {
-        const bstr = evt.target?.result;
-        const workbook = XLSX.read(bstr, { type: 'binary' });
+        const dataBuffer = evt.target?.result as ArrayBuffer;
+        const workbook = XLSX.read(dataBuffer, { type: 'buffer' });
         const sheetName = workbook.SheetNames[0];
         const worksheet = workbook.Sheets[sheetName];
         const data = XLSX.utils.sheet_to_json(worksheet) as any[];
@@ -1584,76 +1600,101 @@ export default function App() {
         const itemNames = Object.keys(pricing);
         const timestamp = new Date().toISOString();
         
-        let importedCount = 0;
-        const batchSize = 400;
+        const errors: any[] = [];
+        const validRecords: SaleRecord[] = [];
         
-        for (let i = 0; i < data.length; i += batchSize) {
-          const chunk = data.slice(i, i + batchSize);
-          const batch = writeBatch(db);
+        data.forEach((row, index) => {
+          const rowNum = index + 2;
+          const studentName = row["Student Name"];
+          const totalAmountRaw = row["Total Amount"];
+          const dateRaw = row["Date"];
           
-          chunk.forEach((row, index) => {
-            const items: CartItem[] = [];
-            itemNames.forEach(itemName => {
-              const sizeKey = `${itemName}_Size`;
-              const qtyKey = `${itemName}_Qty`;
-              const priceKey = `${itemName}_Price`;
-              
-              const size = row[sizeKey];
-              const qty = Number(row[qtyKey] || 0);
-              const price = Number(row[priceKey] || 0);
-              
-              if (qty > 0) {
-                let rate = 0;
-                if (qty > 0) rate = price / qty;
-                if (rate === 0 && pricing[itemName] && size && pricing[itemName][size]) {
-                  rate = pricing[itemName][size].rate;
-                }
+          if (!studentName) {
+            errors.push({ row: rowNum, identifier: "Unknown", reason: "Missing Student Name", rawData: row });
+            return;
+          }
 
-                items.push({
-                  id: crypto.randomUUID(),
-                  item: itemName,
-                  size: String(size || ""),
-                  qty,
-                  rate
-                });
-              }
-            });
+          const totalAmount = Number(totalAmountRaw || 0);
+          if (isNaN(totalAmount)) {
+            errors.push({ row: rowNum, identifier: studentName, reason: `Invalid Total Amount: ${totalAmountRaw}`, rawData: row });
+            return;
+          }
 
-            const customData: Record<string, any> = {};
-            customFields.forEach((f: any) => {
-              if (row[f.label] !== undefined) {
-                customData[f.id] = row[f.label];
-              }
-            });
-
-            const newRecord: SaleRecord = {
-              id: crypto.randomUUID(),
-              srNo: Number(row["Sr. No."]) || (records.length + i + index + 1),
-              date: row["Date"] || new Date().toLocaleDateString('en-IN'),
-              timestamp,
-              name: String(row["Student Name"] || "Unknown"),
-              studentClass: String(row["Class"] || CLASSES[0]),
-              items,
-              totalAmount: Number(row["Total Amount"] || 0),
-              discountPercent: Number(row["Discount %"] || 0),
-              paymentMode: (row["Payment Mode"] as PaymentMode) || 'Pending',
-              paidAmount: row["Paid Amount"] ? Number(row["Paid Amount"]) : null,
-              paymentDate: row["Payment Date"] || null,
-              notes: row["General Notes"] || "",
-              customData
-            };
+          const items: CartItem[] = [];
+          itemNames.forEach(itemName => {
+            const sizeKey = `${itemName}_Size`;
+            const qtyKey = `${itemName}_Qty`;
+            const priceKey = `${itemName}_Price`;
             
-            const docRef = doc(collection(db, 'users', user.id, 'sales'));
-            newRecord.id = docRef.id; // use firestore id
-            batch.set(docRef, newRecord);
-            importedCount++;
+            const size = row[sizeKey];
+            const qty = Number(row[qtyKey] || 0);
+            const price = Number(row[priceKey] || 0);
+            
+            if (qty > 0) {
+              let rate = 0;
+              if (qty > 0) rate = price / qty;
+              if (rate === 0 && pricing[itemName] && size && (pricing[itemName][size] as any)) {
+                rate = (pricing[itemName][size] as any).price || 0;
+              }
+
+              items.push({
+                id: crypto.randomUUID(),
+                item: itemName,
+                size: String(size || ""),
+                qty,
+                rate: rate || 0
+              });
+            }
           });
-          
+
+          const customData: Record<string, any> = {};
+          customFields.forEach((f: any) => {
+            if (row[f.label] !== undefined) {
+              customData[f.id] = row[f.label];
+            }
+          });
+
+          const newRecord: SaleRecord = {
+            id: crypto.randomUUID(),
+            srNo: Number(row["Sr. No."]) || (records.length + validRecords.length + 1),
+            date: dateRaw || new Date().toLocaleDateString('en-IN'),
+            timestamp,
+            name: String(studentName),
+            studentClass: String(row["Class"] || CLASSES[0]),
+            items,
+            totalAmount,
+            discountPercent: Number(row["Discount %"] || 0),
+            paymentMode: (row["Payment Mode"] as PaymentMode) || 'Pending',
+            paidAmount: row["Paid Amount"] ? Number(row["Paid Amount"]) : null,
+            paymentDate: row["Payment Date"] || null,
+            notes: row["General Notes"] || "",
+            customData
+          };
+
+          validRecords.push(newRecord);
+        });
+
+        // Batch commit valid records
+        const batchSize = 400;
+        for (let i = 0; i < validRecords.length; i += batchSize) {
+          const chunk = validRecords.slice(i, i + batchSize);
+          const batch = writeBatch(db);
+          chunk.forEach((rec) => {
+            const docRef = doc(collection(db, 'users', user.id, 'sales'));
+            rec.id = docRef.id;
+            batch.set(docRef, rec);
+          });
           await batch.commit();
         }
 
-        setMsg({ type: 'success', text: `${importedCount} records imported and synced to database` });
-        setTimeout(() => setMsg(null), 3000);
+        if (errors.length > 0) {
+          setImportResult({ type: 'ledger', successCount: validRecords.length, errors });
+          setMsg({ type: 'error', text: `Imported ${validRecords.length} records with ${errors.length} failures.` });
+        } else {
+          setImportResult(null);
+          setMsg({ type: 'success', text: `Successfully imported ${validRecords.length} records!` });
+        }
+        setTimeout(() => setMsg(null), 5000);
       } catch (err) {
         console.error("Import error:", err);
         setMsg({ type: 'error', text: 'Failed to import ledger. Please check file format.' });
@@ -1661,7 +1702,7 @@ export default function App() {
         setIsSubmitting(false);
       }
     };
-    reader.readAsBinaryString(file);
+    reader.readAsArrayBuffer(file);
     e.target.value = ''; // Reset input
   };
 
@@ -1827,32 +1868,52 @@ export default function App() {
                   </div>
 
                   {[
-                    { id: 'dashboard', icon: LayoutDashboard, label: 'Home' },
-                    { id: 'pricing', icon: Database, label: 'Inventory' },
-                    { id: 'sales', icon: PlusCircle, label: 'New Sale' },
-                    { id: 'ledger', icon: History, label: 'Transactions' },
-                    { id: 'reports', icon: BarChart3, label: 'Analytics' },
-                    { id: 'profile', icon: UserCircle, label: 'Account' },
-                    ...(user?.role === 'Admin' ? [{ id: 'admin', icon: Settings, label: 'Settings' }] : []),
+                    { id: 'dashboard', icon: LayoutDashboard, label: 'Analytics Hub' },
+                    { id: 'pricing', icon: Database, label: 'Inventory Console' },
+                    { id: 'sales', icon: PlusCircle, label: 'Create New Entry' },
+                    { id: 'ledger', icon: History, label: 'All Transactions' },
+                    { id: 'reports', icon: BarChart3, label: 'Performance Reports' },
+                    { id: 'profile', icon: UserCircle, label: 'User Profile' },
+                    ...(user?.role === 'Admin' ? [{ id: 'admin', icon: Settings, label: 'System Settings' }] : []),
                   ].map(tab => (
                     <button
                       key={tab.id}
                       onClick={() => { setActiveTab(tab.id as any); setIsMobileMenuOpen(false); }}
-                      className={`w-full flex items-center gap-4 px-4 py-4 rounded-2xl transition-all ${
+                      className={`w-full flex items-center gap-4 px-5 py-4 rounded-2xl transition-all ${
                         activeTab === tab.id 
                           ? 'bg-blue-600 text-white font-black shadow-lg shadow-blue-500/20' 
-                          : 'text-slate-400 hover:text-white'
+                          : 'text-slate-400 hover:text-white hover:bg-white/5'
                       }`}
                     >
-                      <tab.icon size={20} />
-                      <span className="text-xs uppercase tracking-widest">{tab.label}</span>
+                      <tab.icon size={20} className={activeTab === tab.id ? 'text-white' : 'text-slate-500'} aria-hidden="true" />
+                      <span className="text-xs font-black uppercase tracking-widest">{tab.label}</span>
+                      {activeTab === tab.id && (
+                        <motion.div layoutId="mobileMenuIndicator" className="ml-auto w-1.5 h-1.5 bg-white rounded-full" />
+                      )}
                     </button>
                   ))}
                 </div>
+
+                {/* Mobile Diagnostic Info */}
+                <div className="px-6 py-4 space-y-4">
+                   <div className="p-4 bg-white/5 rounded-2xl border border-white/5">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">Active Session</p>
+                      <div className="flex items-center gap-3">
+                         <div className="w-8 h-8 rounded-lg bg-emerald-500/10 flex items-center justify-center">
+                            <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                         </div>
+                         <div>
+                            <p className="text-xs font-bold text-white leading-none">{user?.email}</p>
+                            <p className="text-[10px] font-black text-slate-500 uppercase mt-1">Status: Operational</p>
+                         </div>
+                      </div>
+                   </div>
+                </div>
+
                 <div className="p-6 border-t border-white/5">
-                   <button onClick={logout} className="w-full flex items-center gap-4 px-4 py-4 rounded-2xl text-slate-500 hover:text-red-400">
-                      <LogOut size={20} />
-                      <span className="text-xs font-black uppercase tracking-widest">Sign Out</span>
+                   <button onClick={() => { setIsMobileMenuOpen(false); logout(); }} className="w-full h-14 bg-red-500/10 text-red-500 border border-red-500/20 rounded-2xl flex items-center justify-center gap-3 active:scale-95 transition-all">
+                      <LogOut size={18} />
+                      <span className="text-xs font-black uppercase tracking-widest leading-none">Terminate Session</span>
                    </button>
                 </div>
               </motion.div>
@@ -1860,41 +1921,7 @@ export default function App() {
           )}
         </AnimatePresence>
 
-        {/* Mobile Bottom Nav */}
-        {user && !authLoading && (
-          <div className="fixed bottom-0 left-0 right-0 py-2 bg-white/95 backdrop-blur-xl border-t border-slate-200 z-[90] md:hidden shadow-[0_-10px_30px_rgba(0,0,0,0.05)]">
-            <div className="flex items-center justify-around px-2">
-              <button 
-                onClick={() => setActiveTab('dashboard')}
-                className={`flex flex-col items-center gap-1 p-2 min-w-[80px] transition-all relative ${activeTab === 'dashboard' ? 'text-blue-600' : 'text-slate-400'}`}
-              >
-                <LayoutDashboard size={20} strokeWidth={activeTab === 'dashboard' ? 2.5 : 2} />
-                <span className="text-[9px] font-black uppercase tracking-tighter">Home</span>
-              </button>
-
-              {/* Central Quick Add Action - Prominent New Sale */}
-              <div className="relative -top-4">
-                <button 
-                  onClick={() => setActiveTab('sales')}
-                  className={`w-14 h-14 rounded-2xl flex items-center justify-center shadow-xl transition-all active:scale-90 ${activeTab === 'sales' ? 'bg-blue-600 text-white shadow-blue-500/40 ring-4 ring-blue-50' : 'bg-slate-900 text-white shadow-slate-900/20'}`}
-                >
-                  <Plus size={28} strokeWidth={3} />
-                </button>
-                <div className="absolute top-16 left-1/2 -translate-x-1/2 whitespace-nowrap">
-                  <span className={`text-[8px] font-black uppercase tracking-tighter ${activeTab === 'sales' ? 'text-blue-600' : 'text-slate-400'}`}>New Sale</span>
-                </div>
-              </div>
-
-              <button 
-                onClick={() => setIsMobileMenuOpen(true)}
-                className="flex flex-col items-center gap-1 p-2 min-w-[80px] text-slate-400 transition-all"
-              >
-                <Menu size={20} />
-                <span className="text-[9px] font-black uppercase tracking-tighter">More</span>
-              </button>
-            </div>
-          </div>
-        )}
+        {/* Mobile Bottom Nav - Removed duplicate, consolidated at bottom of file */}
 
         {/* Modern Collapsible Sidebar */}
         {user && !authLoading && (
@@ -1903,7 +1930,7 @@ export default function App() {
             animate={{ width: isSidebarCollapsed ? 80 : 280 }}
             className="hidden md:flex flex-col bg-slate-900 text-white border-r border-slate-800 relative z-30 transition-all duration-300 shadow-2xl"
           >
-            <div className="p-6 h-20 flex items-center justify-between border-b border-white/5">
+            <div className="p-6 h-20 flex items-center justify-between border-b border-white/5 overflow-hidden">
               {!isSidebarCollapsed && (
                 <motion.div 
                   initial={{ opacity: 0, x: -10 }}
@@ -1915,7 +1942,7 @@ export default function App() {
                   </div>
                   <div>
                     <h1 className="text-sm font-black tracking-tighter leading-none">UNIFORM CRM</h1>
-                    <p className="text-[9px] text-slate-500 font-bold uppercase tracking-widest mt-1">NEXT-GEN INT.</p>
+                    <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mt-1">NEXT-GEN INT.</p>
                   </div>
                 </motion.div>
               )}
@@ -1924,6 +1951,12 @@ export default function App() {
                    <FileSpreadsheet size={24} className="text-blue-500" />
                 </div>
               )}
+              <button 
+                onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
+                className="absolute -right-3 top-20 w-6 h-6 bg-slate-800 border border-slate-700 rounded-full flex items-center justify-center text-slate-400 hover:text-white transition-all z-50 hover:scale-110"
+              >
+                {isSidebarCollapsed ? <PanelLeftOpen size={12} /> : <PanelLeftClose size={12} />}
+              </button>
             </div>
 
             <div className="flex-1 py-8 overflow-y-auto custom-scroll space-y-2 px-3">
@@ -1953,10 +1986,10 @@ export default function App() {
                   )}
                   <tab.icon size={20} className={`flex-shrink-0 ${activeTab === tab.id ? 'text-blue-400' : 'text-slate-500 group-hover:text-blue-300'} transition-colors`} />
                   {!isSidebarCollapsed && (
-                    <span className="text-[11px] uppercase tracking-[0.2em]">{tab.label}</span>
+                    <span className="text-xs uppercase tracking-[0.2em]">{tab.label}</span>
                   )}
                   {isSidebarCollapsed && (
-                    <div className="absolute left-16 bg-slate-900 border border-slate-700 px-3 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all whitespace-nowrap z-50 shadow-xl">
+                    <div className="absolute left-16 bg-slate-900 border border-slate-700 px-3 py-2 rounded-lg text-xs font-black uppercase tracking-widest opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all whitespace-nowrap z-50 shadow-xl">
                       {tab.label}
                     </div>
                   )}
@@ -1970,7 +2003,7 @@ export default function App() {
                 className={`w-full flex items-center gap-4 px-4 py-4 rounded-2xl text-slate-500 hover:text-red-400 hover:bg-red-400/5 transition-all group`}
                >
                   <LogOut size={20} className="flex-shrink-0" />
-                  {!isSidebarCollapsed && <span className="text-[11px] font-black uppercase tracking-widest">Sign Out</span>}
+                  {!isSidebarCollapsed && <span className="text-xs font-black uppercase tracking-widest">Sign Out</span>}
                </button>
             </div>
           </motion.aside>
@@ -1979,8 +2012,8 @@ export default function App() {
         <div className="flex-1 flex flex-col min-w-0 transition-all duration-300 overflow-hidden">
           {/* Modern Header */}
           {user && !authLoading && (
-            <header className="h-20 bg-white border-b border-slate-200 flex items-center justify-between px-8 relative z-20 sticky top-0 shrink-0">
-               <div className="flex items-center gap-6">
+            <header className="h-16 md:h-20 bg-white border-b border-slate-200 flex items-center justify-between px-4 md:px-8 relative z-20 sticky top-0 shrink-0">
+               <div className="flex items-center gap-3 md:gap-6 flex-1">
                   <button 
                     onClick={() => {
                       if (window.innerWidth < 768) {
@@ -1989,37 +2022,52 @@ export default function App() {
                         setIsSidebarCollapsed(!isSidebarCollapsed);
                       }
                     }}
-                    className="p-3 bg-slate-100 hover:bg-blue-600 hover:text-white text-slate-500 rounded-2xl transition-all shadow-sm group"
+                    className="p-2.5 md:p-3 bg-slate-50 hover:bg-blue-600 hover:text-white text-slate-500 rounded-xl md:rounded-2xl transition-all shadow-sm group"
                   >
-                    <Menu size={20} />
+                    <Menu size={18} className="md:w-5 md:h-5" />
                   </button>
-                  <div>
+                  <button 
+                    onClick={() => {
+                      setActiveTab('ledger');
+                    }}
+                    className="p-2.5 bg-slate-50 hover:bg-blue-600 hover:text-white text-slate-500 rounded-xl transition-all shadow-sm flex sm:hidden"
+                  >
+                     <Search size={18} />
+                  </button>
+                  <div className="hidden sm:block">
                      <h2 className="text-xs font-black uppercase tracking-[0.3em] text-slate-300">Workstation</h2>
-                     <p className="text-xl font-black text-slate-900 tracking-tight capitalize">{activeTab}</p>
+                     <p className="text-sm md:text-xl font-black text-slate-900 tracking-tight capitalize leading-tight">{activeTab}</p>
                   </div>
                </div>
 
-               <div className="flex items-center gap-6">
-                  <div className="hidden md:flex items-center gap-2 px-4 py-2 bg-slate-50 border border-slate-100 rounded-2xl">
+               <div className="flex sm:hidden absolute left-1/2 -translate-x-1/2">
+                  <p className="text-sm font-black text-slate-900 tracking-tight capitalize">{activeTab}</p>
+               </div>
+
+               <div className="flex items-center gap-3 md:gap-6 flex-1 justify-end">
+                  <div className="hidden lg:flex items-center gap-2 px-4 py-2 bg-slate-50 border border-slate-100 rounded-2xl">
                      <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                     <span className="text-[9px] font-black uppercase tracking-widest text-slate-500">System Live</span>
+                     <span className="text-xs font-black uppercase tracking-widest text-slate-500">System Live</span>
                   </div>
                   
-                  <div className="h-10 w-px bg-slate-100 mx-2" />
+                  <div className="hidden sm:block h-8 md:h-10 w-px bg-slate-100 md:mx-2" />
 
-                  <div className="flex items-center gap-4">
-                     <div className="text-right hidden sm:block">
+                  <div className="flex items-center gap-3 md:gap-4 truncate max-w-[150px] md:max-w-none">
+                     <div className="text-right hidden md:block">
                         <p className="text-xs font-black text-slate-900 leading-none">{user.name}</p>
-                        <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mt-1">{user.role}</p>
+                        <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">{user.role}</p>
                      </div>
-                     <div className="relative">
-                        <div className="w-12 h-12 bg-gradient-to-br from-blue-600 to-blue-700 rounded-2xl flex items-center justify-center text-white font-black shadow-xl shadow-blue-500/20 ring-4 ring-white overflow-hidden">
+                     <button 
+                        onClick={() => setActiveTab('profile')}
+                        className="relative flex-shrink-0 group active:scale-95 transition-all"
+                     >
+                        <div className={`w-9 h-9 md:w-12 md:h-12 bg-gradient-to-br from-blue-600 to-blue-700 rounded-xl md:rounded-2xl flex items-center justify-center text-white font-black shadow-xl ring-2 md:ring-4 ring-white overflow-hidden transition-all ${activeTab === 'profile' ? 'ring-blue-500 shadow-blue-500/40' : 'shadow-blue-500/20'}`}>
                            {user.photoURL ? (
                               <img src={user.photoURL} alt="" className="w-full h-full object-cover" />
                            ) : user.name.charAt(0)}
                         </div>
-                        <div className="absolute -bottom-1 -right-1 w-4 h-4 bg-emerald-500 border-2 border-white rounded-full" />
-                     </div>
+                        <div className="absolute -bottom-1 -right-1 w-3 h-3 md:w-4 md:h-4 bg-emerald-500 border border-white rounded-full" />
+                     </button>
                   </div>
                </div>
             </header>
@@ -2028,12 +2076,12 @@ export default function App() {
           <div className="flex-1 overflow-y-auto custom-scroll bg-slate-50/50 relative">
             {/* Conditional Render Main Container Padding */}
             <main className={`${user && !authLoading ? 'max-w-[1400px]' : ''} mx-auto w-full p-8 md:p-12 pb-32 md:pb-12 h-full flex flex-col`}>
-              {msg && (
+                  {msg && (
                 <motion.div 
                   initial={{ opacity: 0, y: -20 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0 }}
-                  className={`fixed top-8 left-1/2 -translate-x-1/2 z-[100] px-6 py-4 rounded-2xl shadow-2xl border text-[10px] font-black uppercase tracking-widest flex items-center gap-3 backdrop-blur-md ${
+                  className={`fixed top-8 left-1/2 -translate-x-1/2 z-[100] px-6 py-4 rounded-2xl shadow-2xl border text-xs font-black uppercase tracking-widest flex items-center gap-3 backdrop-blur-md ${
                     msg.type === 'success' 
                       ? 'bg-emerald-50/90 text-emerald-600 border-emerald-100' 
                       : 'bg-red-50/90 text-red-600 border-red-100'
@@ -2053,7 +2101,7 @@ export default function App() {
               className="flex flex-col items-center justify-center min-h-[60vh] space-y-4"
             >
               <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin" />
-              <p className="font-black text-slate-400 uppercase tracking-widest text-[10px]">Initializing System...</p>
+              <p className="font-black text-slate-400 uppercase tracking-widest text-xs">Initializing System...</p>
             </motion.div>
           ) : !user ? (
             <motion.div 
@@ -2132,7 +2180,7 @@ export default function App() {
                   <button 
                     type="button"
                     onClick={handleResetPassword}
-                    className="text-[10px] font-bold text-slate-400 hover:text-blue-600 uppercase tracking-widest block mx-auto py-2"
+                    className="text-xs font-bold text-slate-400 hover:text-blue-600 uppercase tracking-widest block mx-auto py-2"
                   >
                     Forgot Credentials?
                   </button>
@@ -2142,7 +2190,7 @@ export default function App() {
                   <div className="absolute inset-0 flex items-center">
                     <div className="w-full border-t border-slate-200"></div>
                   </div>
-                  <div className="relative flex justify-center text-[10px] uppercase font-black tracking-widest">
+                  <div className="relative flex justify-center text-xs uppercase font-black tracking-widest">
                     <span className="bg-slate-50 px-4 text-slate-400">Signup</span>
                   </div>
                 </div>
@@ -2170,7 +2218,7 @@ export default function App() {
                         setIsSignUp(!isSignUp);
                         setLoginError(null);
                     }}
-                    className="w-full py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-blue-600 border border-transparent hover:border-blue-100 hover:bg-blue-50 transition-all"
+                    className="w-full py-4 rounded-2xl text-xs font-black uppercase tracking-widest text-slate-400 hover:text-blue-600 border border-transparent hover:border-blue-100 hover:bg-blue-50 transition-all"
                   >
                     {isSignUp ? (
                         <>Already registered? <span className="text-blue-600 ml-1">Secure Sign In</span></>
@@ -2180,7 +2228,7 @@ export default function App() {
                   </button>
                 </div>
               </form>
-              <div className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Authorized Personnel Only</div>
+              <div className="text-xs text-slate-400 font-bold uppercase tracking-widest">Authorized Personnel Only</div>
             </motion.div>
           ) : (
             <>
@@ -2190,11 +2238,11 @@ export default function App() {
               id="dashboard-panel"
               role="tabpanel"
               aria-labelledby="dashboard-tab"
-              initial={{ opacity: 0, x: 20, rotateY: 10 }}
-              animate={{ opacity: 1, x: 0, rotateY: 0 }}
-              exit={{ opacity: 0, x: -20, rotateY: -10 }}
-              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
-              className="space-y-6"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              transition={{ duration: 0.3, ease: 'easeOut' }}
+              className="space-y-6 md:space-y-10"
             >
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-8">
                 <button 
@@ -2215,7 +2263,7 @@ export default function App() {
                       <div className="bg-white/20 p-2 rounded-lg backdrop-blur-md">
                          <Plus size={16} className="text-white" />
                       </div>
-                      <span className="text-white text-[10px] font-bold uppercase tracking-widest">New Record</span>
+                      <span className="text-white text-xs font-bold uppercase tracking-widest">New Record</span>
                     </div>
                   </div>
                 </button>
@@ -2248,7 +2296,7 @@ export default function App() {
                 <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
                    <div className="flex justify-between items-start mb-4">
                       <div className="p-2 bg-blue-50 text-blue-600 rounded-lg"><TrendingUp size={20} /></div>
-                      <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Total Revenue</span>
+                      <span className="text-xs font-black text-slate-400 uppercase tracking-widest">Total Revenue</span>
                    </div>
                    <div className="text-3xl font-black text-slate-900 font-mono">₹{grandTotal}</div>
                    <div className="text-xs text-slate-500 mt-1">Gross sales lifetime</div>
@@ -2256,7 +2304,7 @@ export default function App() {
                 <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
                    <div className="flex justify-between items-start mb-4">
                       <div className="p-2 bg-emerald-50 text-emerald-600 rounded-lg"><History size={20} /></div>
-                      <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Total Sales</span>
+                      <span className="text-xs font-black text-slate-400 uppercase tracking-widest">Total Sales</span>
                    </div>
                    <div className="text-3xl font-black text-slate-900 font-mono">{stats.totalSales}</div>
                    <div className="text-xs text-slate-500 mt-1">Confirmed transactions</div>
@@ -2264,7 +2312,7 @@ export default function App() {
                 <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
                    <div className="flex justify-between items-start mb-4">
                       <div className="p-2 bg-amber-50 text-amber-600 rounded-lg"><CreditCard size={20} /></div>
-                      <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Unpaid/Pending</span>
+                      <span className="text-xs font-black text-slate-400 uppercase tracking-widest">Unpaid/Pending</span>
                    </div>
                    <div className="text-3xl font-black text-slate-900 font-mono">₹{stats.pendingAmount}</div>
                    <div className="text-xs text-slate-500 mt-1 text-amber-600 font-medium">Pending collection</div>
@@ -2272,7 +2320,7 @@ export default function App() {
                 <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
                    <div className="flex justify-between items-start mb-4">
                       <div className="p-2 bg-indigo-50 text-indigo-600 rounded-lg"><Package size={20} /></div>
-                      <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Realized Revenue</span>
+                      <span className="text-xs font-black text-slate-400 uppercase tracking-widest">Realized Revenue</span>
                    </div>
                    <div className="text-3xl font-black text-slate-900 font-mono">₹{stats.paidAmount}</div>
                    <div className="text-xs text-slate-500 mt-1 text-emerald-600 font-medium">Cash & UPI collected</div>
@@ -2280,64 +2328,143 @@ export default function App() {
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 min-h-[350px]">
-                  <div className="flex justify-between items-center mb-6">
+                {/* Enhanced Sales Trend */}
+                <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 min-h-[400px] flex flex-col">
+                  <div className="flex justify-between items-center mb-6 px-1">
                     <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 flex items-center gap-2">
-                      <BarChart3 size={14} className="text-blue-500" /> Daily Revenue & Payments
+                      <TrendingUp size={14} className="text-blue-500" /> Sales Trend Velocity
                     </h3>
-                    <div className="flex gap-2">
-                       <div className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-indigo-500" /><span className="text-[8px] font-black uppercase text-slate-400">UPI</span></div>
-                       <div className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-emerald-500" /><span className="text-[8px] font-black uppercase text-slate-400">Cash</span></div>
-                       <div className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-amber-500" /><span className="text-[8px] font-black uppercase text-slate-400">Pending</span></div>
-                    </div>
                   </div>
-                  <div className="h-[250px] w-full">
+                  <div className="flex-1 w-full min-h-[250px]">
                     <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={dashboardData.timeSeries}>
+                      <LineChart data={dashboardData.timeSeries}>
                         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                        <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#94a3b8' }} />
-                        <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#94a3b8' }} />
-                        <Tooltip 
-                          contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
-                          labelStyle={{ fontWeight: 'bold', fontSize: '12px' }}
-                          cursor={{ fill: '#f8fafc' }}
+                        <XAxis 
+                          dataKey="date" 
+                          axisLine={false} 
+                          tickLine={false} 
+                          tick={{ fontSize: 9, fill: '#94a3b8', fontWeight: 800 }}
+                          tickFormatter={(val) => val.split('/')[0] + '/' + val.split('/')[1]}
                         />
-                        <Bar dataKey="UPI" stackId="a" fill="#6366f1" radius={[0, 0, 0, 0]} />
-                        <Bar dataKey="Cash" stackId="a" fill="#10b981" radius={[0, 0, 0, 0]} />
-                        <Bar dataKey="Pending" stackId="a" fill="#f59e0b" radius={[4, 4, 0, 0]} />
+                        <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 9, fill: '#94a3b8', fontWeight: 800 }} />
+                        <Tooltip 
+                          contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 20px 25px -5px rgb(0 0 0 / 0.1)', padding: '12px' }}
+                          labelStyle={{ fontWeight: 900, fontSize: '10px', textTransform: 'uppercase', marginBottom: '4px', color: '#1e293b' }}
+                          itemStyle={{ fontSize: '11px', fontWeight: 900, padding: 0 }}
+                          formatter={(value) => [`₹${value}`, 'Revenue']}
+                        />
+                        <Line 
+                          type="monotone" 
+                          dataKey="amount" 
+                          stroke="#3b82f6" 
+                          strokeWidth={4} 
+                          dot={{ r: 4, strokeWidth: 2, fill: '#fff', stroke: '#3b82f6' }} 
+                          activeDot={{ r: 7, strokeWidth: 0, fill: '#1e40af' }}
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+
+                {/* Top Selling Items */}
+                <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 min-h-[400px] flex flex-col">
+                  <div className="flex justify-between items-center mb-6 px-1">
+                    <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 flex items-center gap-2">
+                      <ShoppingBag size={14} className="text-emerald-500" /> High Velocity Items
+                    </h3>
+                  </div>
+                  <div className="flex-1 w-full min-h-[250px]">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={dashboardData.itemAnalysis} layout="vertical">
+                        <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f1f5f9" />
+                        <XAxis type="number" hide />
+                        <YAxis 
+                          dataKey="name" 
+                          type="category" 
+                          axisLine={false} 
+                          tickLine={false} 
+                          width={100}
+                          tick={{ fontSize: 9, fill: '#64748b', fontWeight: 800 }} 
+                        />
+                        <Tooltip 
+                          cursor={{ fill: '#f8fafc' }}
+                          contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
+                        />
+                        <Bar 
+                          dataKey="total" 
+                          fill="#10b981" 
+                          radius={[0, 10, 10, 0]} 
+                          barSize={20}
+                        />
                       </BarChart>
                     </ResponsiveContainer>
                   </div>
                 </div>
 
-                <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 min-h-[350px]">
-                  <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-6 flex items-center gap-2">
-                    <PieChartIcon size={14} className="text-blue-500" /> Transaction Type Mix
-                  </h3>
-                  <div className="h-[250px] w-full flex items-center">
+                <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 min-h-[400px] flex flex-col">
+                  <div className="flex justify-between items-center mb-6 px-1">
+                    <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 flex items-center gap-2">
+                      <BarChart3 size={14} className="text-indigo-500" /> Revenue Segment Mix
+                    </h3>
+                    <div className="flex gap-3">
+                       <div className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-indigo-500" /><span className="text-[9px] font-black uppercase text-slate-400">UPI</span></div>
+                       <div className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-emerald-500" /><span className="text-[9px] font-black uppercase text-slate-400">Cash</span></div>
+                       <div className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-amber-500" /><span className="text-[9px] font-black uppercase text-slate-400">Pending</span></div>
+                    </div>
+                  </div>
+                  <div className="flex-1 w-full min-h-[250px]">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={dashboardData.timeSeries}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                        <XAxis 
+                          dataKey="date" 
+                          axisLine={false} 
+                          tickLine={false} 
+                          tick={{ fontSize: 9, fill: '#94a3b8', fontWeight: 800 }}
+                          tickFormatter={(val) => val.split('/')[0] + '/' + val.split('/')[1]}
+                        />
+                        <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 9, fill: '#94a3b8', fontWeight: 800 }} />
+                        <Tooltip contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }} />
+                        <Bar dataKey="UPI" stackId="a" fill="#6366f1" radius={[0, 0, 0, 0]} barSize={34} />
+                        <Bar dataKey="Cash" stackId="a" fill="#10b981" radius={[0, 0, 0, 0]} barSize={34} />
+                        <Bar dataKey="Pending" stackId="a" fill="#f59e0b" radius={[10, 10, 0, 0]} barSize={34} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+
+                <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 min-h-[400px] flex flex-col items-center">
+                  <div className="w-full flex justify-between items-center mb-6 px-1">
+                    <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 flex items-center gap-2">
+                       <PieChartIcon size={14} className="text-blue-500" /> Payment Mix
+                    </h3>
+                  </div>
+                  <div className="flex-1 w-full min-h-[250px] relative flex items-center justify-center">
                     <ResponsiveContainer width="100%" height="100%">
                       <PieChart>
                         <Pie
                           data={dashboardData.paymentData}
-                          innerRadius={60}
-                          outerRadius={80}
-                          paddingAngle={5}
+                          cx="50%"
+                          cy="50%"
+                          innerRadius={70}
+                          outerRadius={95}
+                          paddingAngle={8}
                           dataKey="value"
                         >
-                          {dashboardData.paymentData.map((entry, index) => (
-                            <Cell key={`cell-${index}`} fill={['#f59e0b', '#6366f1', '#10b981'][index % 3]} />
+                          {dashboardData.paymentData.map((entry: any, index: number) => (
+                            <Cell 
+                              key={`cell-${index}`} 
+                              fill={entry.name === 'UPI' ? '#6366f1' : entry.name === 'Cash' ? '#10b981' : '#f59e0b'} 
+                            />
                           ))}
                         </Pie>
-                        <Tooltip />
+                        <Tooltip contentStyle={{ borderRadius: '14px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }} />
                       </PieChart>
                     </ResponsiveContainer>
-                    <div className="w-1/3 space-y-4">
-                       {dashboardData.paymentData.map((d, i) => (
-                         <div key={d.name} className="flex flex-col">
-                            <span className="text-[10px] font-black uppercase text-slate-400 leading-none mb-1">{d.name}</span>
-                            <span className="text-xl font-black text-slate-800 leading-none">{d.value} <span className="text-[9px] font-medium text-slate-400 uppercase tracking-tighter">Records</span></span>
-                         </div>
-                       ))}
+                    <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                       <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest leading-none">Total</span>
+                       <span className="text-3xl font-black text-slate-900 leading-none my-1">{stats.totalSales}</span>
+                       <span className="text-[8px] font-bold text-slate-400 uppercase tracking-tighter">Orders</span>
                     </div>
                   </div>
                 </div>
@@ -2350,14 +2477,14 @@ export default function App() {
                   </h3>
                   <button 
                     onClick={() => setActiveTab('ledger')}
-                    className="text-[10px] font-black text-blue-600 hover:text-blue-700 uppercase tracking-widest flex items-center gap-1"
+                    className="text-xs font-black text-blue-600 hover:text-blue-700 uppercase tracking-widest flex items-center gap-1"
                   >
                     View All <ArrowRight size={12} />
                   </button>
                 </div>
                 <div className="overflow-x-auto">
                   <table className="w-full text-left">
-                    <thead className="bg-slate-50 text-[9px] uppercase font-black text-slate-400">
+                    <thead className="bg-slate-50 text-[10px] uppercase font-black text-slate-400">
                       <tr>
                         <th className="px-6 py-3">Sr.</th>
                         <th className="px-6 py-3">Student</th>
@@ -2370,25 +2497,25 @@ export default function App() {
                     <tbody className="divide-y divide-slate-50">
                       {records.slice(0, 5).map((r: any) => (
                         <tr key={r.id} className="hover:bg-slate-50/50 transition-colors">
-                          <td className="px-6 py-4 font-mono text-[10px] text-slate-400">#{r.srNo}</td>
+                          <td className="px-6 py-4 font-mono text-xs text-slate-400">#{r.srNo}</td>
                           <td className="px-6 py-4">
-                             <p className="text-[11px] font-black text-slate-800 uppercase leading-none">{r.name}</p>
-                             <p className="text-[9px] text-slate-400 font-bold mt-1 uppercase tracking-tighter">{r.studentClass}</p>
+                             <p className="text-xs font-black text-slate-800 uppercase leading-none">{r.name}</p>
+                             <p className="text-[10px] text-slate-400 font-bold mt-1 uppercase tracking-tighter">{r.studentClass}</p>
                           </td>
-                          <td className="px-6 py-4 text-[10px] font-mono text-slate-500">{r.date}</td>
+                          <td className="px-6 py-4 text-xs font-mono text-slate-500">{r.date}</td>
                           <td className="px-6 py-4">
                              <div className="flex flex-wrap gap-1">
                                 {r.items.slice(0, 2).map((it: any) => (
-                                  <span key={it.id} className="px-1.5 py-0.5 bg-slate-100 rounded text-[8px] font-bold text-slate-600 border border-slate-200">
+                                  <span key={it.id} className="px-1.5 py-0.5 bg-slate-100 rounded text-[10px] font-bold text-slate-600 border border-slate-200">
                                     {it.item}
                                   </span>
                                 ))}
-                                {r.items.length > 2 && <span className="text-[8px] font-bold text-slate-400">+{r.items.length - 2} more</span>}
+                                {r.items.length > 2 && <span className="text-[10px] font-bold text-slate-400">+{r.items.length - 2} more</span>}
                              </div>
                           </td>
-                          <td className="px-6 py-4 text-right font-black text-slate-900 text-[11px] font-mono">₹{r.totalAmount}</td>
+                          <td className="px-6 py-4 text-right font-black text-slate-900 text-xs font-mono">₹{r.totalAmount}</td>
                           <td className="px-6 py-4">
-                             <span className={`px-2 py-0.5 rounded-lg text-[8px] font-black uppercase border ${
+                             <span className={`px-2 py-0.5 rounded-lg text-[10px] font-black uppercase border ${
                                r.paymentMode === 'Pending' ? 'bg-amber-50 text-amber-600 border-amber-100' :
                                r.paymentMode === 'UPI' ? 'bg-indigo-50 text-indigo-600 border-indigo-100' :
                                'bg-emerald-50 text-emerald-600 border-emerald-100'
@@ -2401,7 +2528,7 @@ export default function App() {
                       {records.length === 0 && (
                         <tr>
                           <td colSpan={6} className="px-6 py-12 text-center">
-                            <p className="text-[10px] font-black uppercase text-slate-300 italic tracking-widest">No recent transactions found</p>
+                            <p className="text-xs font-black uppercase text-slate-300 italic tracking-widest">No recent transactions found</p>
                           </td>
                         </tr>
                       )}
@@ -2496,81 +2623,44 @@ export default function App() {
               id="pricing-panel"
               role="tabpanel"
               aria-labelledby="pricing-tab"
-              initial={{ opacity: 0, x: 20, rotateY: 10 }}
-              animate={{ opacity: 1, x: 0, rotateY: 0 }}
-              exit={{ opacity: 0, x: -20, rotateY: -10 }}
-              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
-              className="max-w-4xl mx-auto space-y-6"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              transition={{ duration: 0.3, ease: 'easeOut' }}
+              className="max-w-6xl mx-auto space-y-6"
             >
-              {/* Sub-navigation for Pricing */}
-              <div className="flex bg-slate-200/50 p-1.5 rounded-[20px] w-fit mx-auto shadow-inner relative gap-1">
-                {[
-                  { id: 'prices', icon: Tag, label: 'Standard Rates', color: 'text-blue-600', activeBg: 'bg-blue-50' },
-                  { id: 'inventory', icon: Package, label: 'Inventory Control', color: 'text-orange-600', activeBg: 'bg-orange-50' }
-                ].map(mode => (
-                  <button 
-                    key={mode.id}
-                    onClick={() => setPricingMode(mode.id as any)}
-                    className={`px-8 py-3 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-2 relative z-10 ${
-                      pricingMode === mode.id ? mode.color : 'text-slate-500 hover:text-slate-700'
-                    }`}
-                  >
-                    {pricingMode === mode.id && (
-                      <motion.div
-                        layoutId="activePricingMode"
-                        className={`absolute inset-0 bg-white rounded-2xl shadow-sm ring-1 ring-slate-200 -z-10`}
-                        transition={{ type: 'spring', bounce: 0.2, duration: 0.5 }}
-                      />
-                    )}
-                    <mode.icon size={14} /> {mode.label}
-                  </button>
-                ))}
-              </div>
+              <UnifiedProductSection 
+                pricing={pricing}
+                itemOrder={itemOrder}
+                updateItemOrder={updateItemOrder}
+                handleMove={handleMove}
+                handleMoveSize={handleMoveSize}
+                handlePriceChange={handlePriceChange}
+                handleStockChange={handleStockChange}
+                handleMinStockChange={handleMinStockChange}
+                renameItem={renameItem}
+                renameSize={renameSize}
+                addNewItem={addNewItem}
+                deleteItem={deleteItem}
+                addNewSize={addNewSize}
+                deleteSize={deleteSize}
+                newItem={newItem}
+                setNewItem={setNewItem}
+                can={can}
+                exportPricing={exportPricing}
+                importPricing={importPricing}
+                exportPricingExcel={exportPricingExcel}
+                importPricingExcel={importPricingExcel}
+                setMsg={setMsg}
+                downloadPricingTemplate={downloadPricingTemplate}
+              />
 
-              {pricingMode === 'prices' ? (
-                <PriceConfigSection 
-                  pricing={pricing}
-                  itemOrder={itemOrder}
-                  updateItemOrder={updateItemOrder}
-                  handlePriceChange={handlePriceChange}
-                  renameItem={renameItem}
-                  renameSize={renameSize}
-                  addNewItem={addNewItem}
-                  deleteItem={deleteItem}
-                  addNewSize={addNewSize}
-                  deleteSize={deleteSize}
-                  newItem={newItem}
-                  setNewItem={setNewItem}
-                  can={can}
-                  exportPricing={exportPricing}
-                  importPricing={importPricing}
-                  exportPricingExcel={exportPricingExcel}
-                  importPricingExcel={importPricingExcel}
-                  setMsg={setMsg}
-                />
-              ) : (
-                <InventoryConfigSection 
-                  pricing={pricing}
-                  itemOrder={itemOrder}
-                  handleStockChange={handleStockChange}
-                  handleMinStockChange={handleMinStockChange}
-                  can={can}
-                  exportPricing={exportPricing}
-                  importPricing={importPricing}
-                  exportPricingExcel={exportPricingExcel}
-                  importPricingExcel={importPricingExcel}
-                  renameItem={renameItem}
-                  renameSize={renameSize}
-                  setMsg={setMsg}
-                />
-              )}
-
-              <div className="flex justify-center mt-8">
+              <div className="flex justify-center pt-8">
                 <button 
                   onClick={() => setActiveTab('sales')}
-                  className="flex items-center gap-2 px-6 py-2.5 border-2 border-blue-600 text-blue-600 rounded-xl font-bold text-sm hover:bg-blue-50 transition-all font-mono"
+                  className="flex items-center gap-2 px-8 py-3 bg-blue-600 text-white rounded-full font-black text-sm hover:bg-blue-700 transition-all shadow-lg hover:translate-y-[-2px] active:translate-y-0"
                 >
-                  PROCEED TO BILLING <ChevronRight size={16} />
+                  START NEW SALE <PlusCircle size={16} />
                 </button>
               </div>
             </motion.div>
@@ -2582,11 +2672,11 @@ export default function App() {
               id="sales-panel"
               role="tabpanel"
               aria-labelledby="sales-tab"
-              initial={{ opacity: 0, x: 20, rotateY: 10 }}
-              animate={{ opacity: 1, x: 0, rotateY: 0 }}
-              exit={{ opacity: 0, x: -20, rotateY: -10 }}
-              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
-              className="max-w-3xl mx-auto"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              transition={{ duration: 0.3, ease: 'easeOut' }}
+              className="max-w-4xl mx-auto"
             >
               <SalesFormSection 
                 showConfig={showConfig}
@@ -2628,10 +2718,9 @@ export default function App() {
                 updateCustomField={updateCustomField}
                 recentRecords={records.slice(0, 3)}
                 can={can}
-                isAnalyzing={isAnalyzing}
-                importFromSpreadsheet={importFromSpreadsheet}
-                summarizeNotes={summarizeNotes}
-                isSummarizing={isSummarizing}
+                exportPricing={exportPricing}
+                importPricing={importPricing}
+                importPricingExcel={importPricingExcel}
               />
             </motion.div>
           )}
@@ -2642,10 +2731,10 @@ export default function App() {
               id="ledger-panel"
               role="tabpanel"
               aria-labelledby="ledger-tab"
-              initial={{ opacity: 0, x: 20, rotateY: 10 }}
-              animate={{ opacity: 1, x: 0, rotateY: 0 }}
-              exit={{ opacity: 0, x: -20, rotateY: -10 }}
-              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              transition={{ duration: 0.3, ease: 'easeOut' }}
             >
               <LedgerSection 
                 records={filteredRecords}
@@ -2664,8 +2753,6 @@ export default function App() {
                 setClassFilter={setClassFilter}
                 exportLedger={exportLedger}
                 importLedger={importLedger}
-                importFromSpreadsheet={importFromSpreadsheet}
-                isAnalyzing={isAnalyzing}
                 handlePrint={handlePrint}
                 deleteRecord={deleteRecord}
                 setEditingRecord={setEditingRecord}
@@ -2681,7 +2768,10 @@ export default function App() {
                 downloadTemplate={downloadTemplate}
                 grandTotal={filteredRecords.reduce((sum, r) => sum + r.totalAmount, 0)}
                 pricing={pricing}
+                itemOrder={itemOrder}
                 can={can}
+                getNextSrNo={getNextSrNo}
+                setMsg={setMsg}
               />
             </motion.div>
           )}
@@ -2692,10 +2782,10 @@ export default function App() {
               id="reports-panel"
               role="tabpanel"
               aria-labelledby="reports-tab"
-              initial={{ opacity: 0, x: 20, rotateY: 10 }}
-              animate={{ opacity: 1, x: 0, rotateY: 0 }}
-              exit={{ opacity: 0, x: -20, rotateY: -10 }}
-              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              transition={{ duration: 0.3, ease: 'easeOut' }}
             >
               <ReportsSection 
                 records={records}
@@ -2708,6 +2798,7 @@ export default function App() {
                 setItemFilter={setReportItemFilter}
                 classFilter={reportClassFilter}
                 setClassFilter={setReportClassFilter}
+                setActiveTab={setActiveTab}
               />
             </motion.div>
           )}
@@ -2718,10 +2809,10 @@ export default function App() {
               id="profile-panel"
               role="tabpanel"
               aria-labelledby="profile-tab"
-              initial={{ opacity: 0, x: 20, rotateY: 10 }}
-              animate={{ opacity: 1, x: 0, rotateY: 0 }}
-              exit={{ opacity: 0, x: -20, rotateY: -10 }}
-              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              transition={{ duration: 0.3, ease: 'easeOut' }}
             >
               <ProfileSection 
                 user={user}
@@ -2741,10 +2832,10 @@ export default function App() {
               key="admin"
               id="admin-panel"
               role="tabpanel"
-              initial={{ opacity: 0, x: 20, rotateY: 10 }}
-              animate={{ opacity: 1, x: 0, rotateY: 0 }}
-              exit={{ opacity: 0, x: -20, rotateY: -10 }}
-              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              transition={{ duration: 0.3, ease: 'easeOut' }}
             >
               <AdminDashboard 
                 users={users}
@@ -2798,14 +2889,14 @@ export default function App() {
                   <button 
                     disabled={isSubmitting}
                     onClick={() => setShowConfirmation(false)}
-                    className="flex-1 px-6 py-3 bg-slate-100 text-slate-600 rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-200 transition-all disabled:opacity-50"
+                    className="flex-1 px-6 py-3 bg-slate-100 text-slate-600 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-200 transition-all disabled:opacity-50"
                   >
                     Review
                   </button>
                   <button 
                     disabled={isSubmitting}
                     onClick={submitTransaction}
-                    className="flex-1 px-6 py-3 bg-blue-600 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-blue-700 transition-all shadow-xl shadow-blue-500/20 disabled:opacity-50 flex items-center justify-center gap-2"
+                    className="flex-1 px-6 py-3 bg-blue-600 text-white rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-blue-700 transition-all shadow-xl shadow-blue-500/20 disabled:opacity-50 flex items-center justify-center gap-2"
                   >
                     {isSubmitting ? (
                       <>
@@ -2836,45 +2927,87 @@ export default function App() {
       <AnimatePresence>
         {user && (
           <motion.div 
-            initial={{ y: 20, opacity: 0 }}
-            animate={{ y: 0, opacity: 1 }}
-            exit={{ y: 20, opacity: 0 }}
-            className="fixed bottom-0 left-0 right-0 bg-white/95 backdrop-blur-xl border-t border-slate-200 px-4 py-2 flex sm:hidden justify-between items-center z-[100] shadow-[0_-10px_30px_rgba(0,0,0,0.08)] pb-safe" 
+            initial={{ y: 100 }}
+            animate={{ y: 0 }}
+            exit={{ y: 100 }}
+            transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+            className="fixed bottom-0 left-0 right-0 h-[84px] bg-white/80 backdrop-blur-2xl border-t border-slate-200/50 flex sm:hidden justify-between items-center z-[100] shadow-[0_-20px_40px_rgba(0,0,0,0.08)] pb-safe px-6" 
             role="tablist" 
             aria-label="Mobile Navigation"
           >
             {[
-              { id: 'dashboard', icon: LayoutDashboard, label: 'Home' },
+              { id: 'dashboard', icon: LayoutDashboard, label: 'Board' },
               { id: 'ledger', icon: History, label: 'Ledger' },
-              { id: 'pricing', icon: Database, label: 'Stock' },
-              { id: 'profile', icon: UserCircle, label: 'Account' },
-            ].map(tab => (
-              <button
-                key={tab.id}
-                role="tab"
-                aria-selected={activeTab === tab.id}
-                onClick={() => setActiveTab(tab.id as any)}
-                className={`flex flex-col items-center gap-1 p-2 flex-1 transition-all ${
-                  activeTab === tab.id ? 'text-blue-600' : 'text-slate-400 opacity-60'
-                }`}
-              >
-                <tab.icon size={20} strokeWidth={activeTab === tab.id ? 2.5 : 2} aria-hidden="true" />
-                <span className="text-[8px] font-black uppercase tracking-tighter">{tab.label}</span>
-              </button>
-            ))}
+              { id: 'sales', icon: Plus, label: 'New', isFab: true },
+              { id: 'pricing', icon: Database, label: 'Items' },
+              { id: 'profile', icon: UserCircle, label: 'Profile' },
+            ].map((tab, idx) => {
+              if (tab.isFab) {
+                return (
+                  <div key={tab.id} className="relative -top-8 flex flex-col items-center">
+                    <button 
+                      onClick={() => setActiveTab('sales')}
+                      className={`group relative w-16 h-16 rounded-3xl flex items-center justify-center shadow-2xl transition-all duration-300 active:scale-90 ${
+                        activeTab === 'sales' 
+                          ? 'bg-blue-600 text-white shadow-blue-500/40 ring-4 ring-white' 
+                          : 'bg-slate-900 text-white shadow-slate-900/40 ring-4 ring-white'
+                      }`}
+                    >
+                      <motion.div
+                        animate={activeTab === 'sales' ? { rotate: 90 } : { rotate: 0 }}
+                      >
+                        <Plus size={32} strokeWidth={2.5} />
+                      </motion.div>
+                      
+                      {/* Decorative elements for FAB */}
+                      <div className="absolute inset-0 rounded-3xl bg-white/20 opacity-0 group-hover:opacity-100 transition-opacity" />
+                    </button>
+                    <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 mt-2">New Sale</span>
+                  </div>
+                );
+              }
 
-            {/* Central Prominent Quick Add */}
-            <div className="relative -top-6 flex flex-col items-center">
-              <button 
-                onClick={() => setActiveTab('sales')}
-                className={`w-14 h-14 rounded-full flex items-center justify-center shadow-2xl transition-all active:scale-90 ${
-                  activeTab === 'sales' ? 'bg-blue-600 text-white shadow-blue-500/40 ring-4 ring-white' : 'bg-slate-900 text-white shadow-slate-900/40 ring-4 ring-white'
-                }`}
-              >
-                <Plus size={28} strokeWidth={3} />
-              </button>
-              <span className="text-[8px] font-black uppercase tracking-[0.2em] text-slate-400 mt-2">New Sale</span>
-            </div>
+              return (
+                <button
+                  key={tab.id}
+                  role="tab"
+                  aria-selected={activeTab === tab.id}
+                  onClick={() => setActiveTab(tab.id as any)}
+                  className={`flex flex-col items-center justify-center gap-1.5 min-w-[56px] h-full transition-all relative ${
+                    activeTab === tab.id ? 'text-blue-600' : 'text-slate-400 hover:text-slate-600'
+                  }`}
+                >
+                  <div className={`relative p-2 rounded-2xl transition-all duration-300 ${
+                    activeTab === tab.id ? 'bg-blue-50 scale-110' : 'bg-transparent'
+                  }`}>
+                    <tab.icon size={22} strokeWidth={activeTab === tab.id ? 2.5 : 2} />
+                    
+                    {activeTab === tab.id && (
+                      <motion.div 
+                        layoutId="mobileNavGlow"
+                        className="absolute inset-0 bg-blue-400/20 rounded-2xl blur-lg pointer-events-none"
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        transition={{ duration: 0.5 }}
+                      />
+                    )}
+                  </div>
+                  <span className={`text-[9px] font-black uppercase tracking-wide transition-all duration-300 ${
+                    activeTab === tab.id ? 'opacity-100 translate-y-0' : 'opacity-60 translate-y-0'
+                  }`}>
+                    {tab.label}
+                  </span>
+                  
+                  {activeTab === tab.id && (
+                    <motion.div 
+                      layoutId="mobileNavActiveIndicator"
+                      className="absolute bottom-1 w-1 h-1 bg-blue-600 rounded-full"
+                      transition={{ type: 'spring', bounce: 0.2, duration: 0.6 }}
+                    />
+                  )}
+                </button>
+              );
+            })}
           </motion.div>
         )}
       </AnimatePresence>
@@ -2945,44 +3078,58 @@ function ProfileSection({ user, setUser, logout }: any) {
     setTimeout(() => setMsg(null), 3000);
   };
 
-  const handleChangePassword = (e: React.FormEvent) => {
+  const handleChangePassword = async (e: React.FormEvent) => {
     e.preventDefault();
-    // In a real app, we would verify current password. 
-    // Here we just simulate for the mock admin.
-    if (newPassword.length < 6) {
-      setMsg({ type: 'error', text: 'New password must be at least 6 characters.' });
-      return;
+    if (!user?.email) return;
+    setIsSubmitting(true);
+    try {
+      await sendPasswordResetEmail(auth, user.email);
+      setMsg({ type: 'success', text: 'Password reset email sent. Please check your inbox.' });
+    } catch (err: any) {
+      setMsg({ type: 'error', text: 'Failed to send reset email: ' + err.message });
+    } finally {
+      setIsSubmitting(false);
+      setTimeout(() => setMsg(null), 5000);
     }
-    setMsg({ type: 'success', text: 'Password changed successfully.' });
-    setCurrentPassword('');
-    setNewPassword('');
-    setTimeout(() => setMsg(null), 3000);
   };
+
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   return (
     <div className="max-w-4xl mx-auto space-y-8">
-      <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">
-        <div className="flex flex-col md:flex-row gap-8 items-start">
+      <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm relative overflow-hidden">
+        {/* Abstract Background Element */}
+        <div className="absolute top-0 right-0 w-64 h-64 bg-blue-50 rounded-full blur-3xl -mr-32 -mt-32 opacity-50 pointer-events-none" />
+        
+        <div className="flex flex-col md:flex-row gap-8 items-start relative z-10">
           <div className="relative group self-center md:self-start">
-            <div className="w-32 h-32 bg-blue-600 rounded-3xl flex items-center justify-center shadow-2xl shadow-blue-500/20 text-white shrink-0 overflow-hidden relative">
+            <div className="w-32 h-32 bg-slate-900 rounded-[2rem] flex items-center justify-center shadow-2xl shadow-slate-900/20 text-white shrink-0 overflow-hidden relative border-4 border-white ring-1 ring-slate-200">
               {user?.photoURL ? (
-                <img src={user.photoURL} alt="Profile" className="w-full h-full object-cover" />
+                <img src={user.photoURL} alt="Profile" className="w-full h-full object-cover transition-transform group-hover:scale-110 duration-500" />
               ) : (
-                <UserCircle size={64} />
+                <div className="flex flex-col items-center">
+                  <UserCircle size={48} className="text-slate-400" />
+                  <span className="text-[10px] font-black uppercase tracking-tighter opacity-40 mt-1">No Photo</span>
+                </div>
               )}
+              {/* Overlay on hover */}
+              <div 
+                className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center cursor-pointer"
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <Upload size={24} className="text-white" />
+              </div>
             </div>
 
-            <div className="absolute -bottom-3 -right-3 flex flex-col gap-2 z-30">
-              <div className="flex gap-2">
-                <button 
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  className="p-3 bg-slate-900 text-white rounded-2xl shadow-lg hover:bg-indigo-600 transition-all border-4 border-white"
-                  title="Upload photo"
-                >
-                  <Upload size={18} />
-                </button>
-              </div>
+            <div className="absolute -bottom-2 -right-2">
+              <button 
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="p-3 bg-blue-600 text-white rounded-2xl shadow-lg hover:bg-blue-700 transition-all border-4 border-white"
+                title="Upload photo"
+              >
+                <Plus size={16} strokeWidth={3} />
+              </button>
             </div>
 
             <input 
@@ -2995,98 +3142,115 @@ function ProfileSection({ user, setUser, logout }: any) {
           </div>
 
           <div className="space-y-4 flex-1 w-full text-left">
-             <div className="space-y-1">
-                <h2 className="text-3xl font-black text-slate-900 tracking-tight">Account Settings</h2>
-                <p className="text-slate-500 font-medium">Manage your profile identification and security.</p>
+             <div className="flex justify-between items-start">
+               <div className="space-y-1">
+                  <h2 className="text-3xl font-black text-slate-900 tracking-tight flex items-center gap-3">
+                    Personal Hub
+                    <span className="px-3 py-1 bg-blue-600 text-white text-[9px] font-black uppercase tracking-[0.2em] rounded-full">
+                      {user?.role || 'Viewer'}
+                    </span>
+                  </h2>
+                  <p className="text-slate-500 font-medium">Customize your workspace and identity.</p>
+               </div>
+               <button 
+                onClick={logout}
+                className="p-3 bg-red-50 text-red-600 rounded-2xl hover:bg-red-100 transition-all border border-red-100 group"
+                title="Logout"
+              >
+                <LogOut size={18} className="group-hover:rotate-12 transition-transform" />
+              </button>
              </div>
              
              {msg && (
                <motion.div 
                  initial={{ opacity: 0, y: -10 }} 
                  animate={{ opacity: 1, y: 0 }}
-                 className={`p-4 rounded-2xl text-[10px] font-black uppercase tracking-widest ${msg.type === 'success' ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' : 'bg-red-50 text-red-600 border border-red-100'}`}
+                 className={`p-5 rounded-2xl flex items-center gap-3 ${msg.type === 'success' ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' : 'bg-red-50 text-red-700 border border-red-100'}`}
                >
-                 {msg.text}
+                 {msg.type === 'success' ? <CheckCircle2 size={20} /> : <AlertCircle size={20} />}
+                 <span className="text-[11px] font-black uppercase tracking-widest">{msg.text}</span>
                </motion.div>
              )}
 
              <div className="grid grid-cols-1 md:grid-cols-2 gap-8 pt-4">
-                <form onSubmit={handleUpdateName} className="space-y-4">
-                   <h3 className="text-xs font-black uppercase tracking-widest text-slate-400">Basic Information</h3>
+                {/* Identity Form */}
+                <form onSubmit={handleUpdateName} className="space-y-6 bg-slate-50/50 p-6 rounded-3xl border border-slate-100">
+                   <div className="flex items-center gap-3 mb-2">
+                     <div className="p-2 bg-blue-100 text-blue-600 rounded-xl"><UserIcon size={14} /></div>
+                     <h3 className="text-[11px] font-black uppercase tracking-widest text-slate-900">Identification</h3>
+                   </div>
+                   
                    <div className="space-y-4">
-                      <div className="space-y-1">
+                      <div className="space-y-1.5">
                          <label className="text-[9px] font-black uppercase text-slate-400 ml-1 flex items-center gap-2">
-                           Email Address (Read Only)
+                           Email Identity
                            {user?.emailVerified ? (
-                             <span className="text-[8px] bg-emerald-50 text-emerald-600 px-1.5 py-0.5 rounded-full flex items-center gap-1">
-                               <Check size={8} /> Verified
+                             <span className="text-[8px] bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full flex items-center gap-1 font-bold">
+                               VERIFIED
                              </span>
                            ) : (
-                             <span className="text-[8px] bg-amber-50 text-amber-600 px-1.5 py-0.5 rounded-full flex items-center gap-1">
-                               <AlertCircle size={8} /> Pending
+                             <span className="text-[8px] bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full flex items-center gap-1 font-bold">
+                               UNVERIFIED
                              </span>
                            ) }
                          </label>
-                         <div className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-slate-400 font-bold text-sm cursor-not-allowed">
+                         <div className="w-full px-5 py-4 bg-white border border-slate-200 rounded-2xl text-slate-400 font-bold text-sm flex items-center justify-between">
                             {user?.email}
+                            <Lock size={12} className="opacity-30" />
                          </div>
                       </div>
-                      <div className="space-y-1">
-                         <label className="text-[9px] font-black uppercase text-slate-400 ml-1">Display Name</label>
+                      <div className="space-y-1.5">
+                         <label className="text-[9px] font-black uppercase text-slate-400 ml-1">Full Name</label>
                          <input 
                            type="text" 
                            value={name}
                            onChange={(e) => setName(e.target.value)}
-                           className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-slate-900 font-bold text-sm focus:border-blue-600 focus:ring-4 focus:ring-blue-600/5 outline-none transition-all"
+                           className="w-full px-5 py-4 bg-white border border-slate-200 rounded-2xl text-slate-900 font-bold text-sm focus:border-blue-600 focus:ring-8 focus:ring-blue-600/5 outline-none transition-all shadow-sm"
+                           placeholder="Enter your name"
                          />
                       </div>
-                      <button type="submit" className="px-6 py-3 bg-slate-900 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-800 transition-all shadow-lg">
-                        Update Information
+                      <button type="submit" className="w-full py-4 bg-slate-900 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-800 transition-all shadow-xl active:scale-95 group flex items-center justify-center gap-2">
+                        Sync Changes <RefreshCw size={14} className="group-hover:rotate-180 transition-transform duration-700" />
                       </button>
                    </div>
                 </form>
 
-                <form onSubmit={handleChangePassword} className="space-y-4">
-                   <h3 className="text-xs font-black uppercase tracking-widest text-slate-400">Security & PIN</h3>
+                {/* Security Section */}
+                <div className="space-y-6 bg-slate-50/50 p-6 rounded-3xl border border-slate-100">
+                   <div className="flex items-center gap-3 mb-2">
+                     <div className="p-2 bg-indigo-100 text-indigo-600 rounded-xl"><Lock size={14} /></div>
+                     <h3 className="text-[11px] font-black uppercase tracking-widest text-slate-900">Security & Access</h3>
+                   </div>
+                   
                    <div className="space-y-4">
-                      <div className="space-y-1">
-                         <label className="text-[9px] font-black uppercase text-slate-400 ml-1">Current Password</label>
-                         <input 
-                           type="password" 
-                           placeholder="••••••••"
-                           value={currentPassword}
-                           onChange={(e) => setCurrentPassword(e.target.value)}
-                           className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-slate-900 font-bold text-sm focus:border-blue-600 focus:ring-4 focus:ring-blue-600/5 outline-none transition-all"
-                         />
+                      <div className="p-5 bg-white border border-slate-200 rounded-2xl space-y-3">
+                        <p className="text-xs text-slate-600 font-medium leading-relaxed">
+                          To change your password or security credentials, we'll send a secure link to your registered email address.
+                        </p>
+                        <button 
+                          onClick={handleChangePassword}
+                          disabled={isSubmitting}
+                          className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-500/20 active:scale-95 flex items-center justify-center gap-2 h-12"
+                        >
+                          {isSubmitting ? <Loader2 size={16} className="animate-spin" /> : <Mail size={16} />}
+                          {isSubmitting ? 'Sending Request...' : 'Trigger Password Reset'}
+                        </button>
                       </div>
-                      <div className="space-y-1">
-                         <label className="text-[9px] font-black uppercase text-slate-400 ml-1">New Password</label>
-                         <input 
-                           type="password" 
-                           placeholder="••••••••"
-                           value={newPassword}
-                           onChange={(e) => setNewPassword(e.target.value)}
-                           className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-slate-900 font-bold text-sm focus:border-blue-600 focus:ring-4 focus:ring-blue-600/5 outline-none transition-all"
-                         />
-                      </div>
-                      <button type="submit" className="px-6 py-3 bg-blue-600 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-blue-700 transition-all shadow-lg shadow-blue-500/20">
-                        Change Password
-                      </button>
-                   </div>
-                </form>
-             </div>
 
-             <div className="pt-8 border-t border-slate-100 mt-8 flex justify-between items-center">
-                <div>
-                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Sign Out</p>
-                   <p className="text-xs text-slate-500">End your current session securely.</p>
+                      <div className="p-5 bg-white border border-slate-200 rounded-2xl">
+                        <div className="flex items-center justify-between mb-2">
+                           <span className="text-[9px] font-black uppercase text-slate-400">Account Type</span>
+                           <span className="text-[10px] font-bold text-slate-600">Free Tier</span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                           <span className="text-[9px] font-black uppercase text-slate-400">Join Date</span>
+                           <span className="text-[10px] font-bold text-slate-600">
+                             {user?.createdAt ? new Date(user.createdAt).toLocaleDateString() : 'N/A'}
+                           </span>
+                        </div>
+                      </div>
+                   </div>
                 </div>
-                <button 
-                  onClick={logout}
-                  className="px-6 py-3 border-2 border-red-500/20 text-red-600 rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-red-50 transition-all"
-                >
-                  Logout Session
-                </button>
              </div>
           </div>
         </div>
@@ -3531,7 +3695,8 @@ function AdminDashboard({
 
 function ReportsSection({ 
   records, pricing, dateStart, setDateStart, dateEnd, setDateEnd, 
-  itemFilter, setItemFilter, classFilter, setClassFilter 
+  itemFilter, setItemFilter, classFilter, setClassFilter,
+  setActiveTab
 }: any) {
   const itemNames = Object.keys(pricing);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -3612,7 +3777,7 @@ function ReportsSection({
     if (active && payload && payload.length) {
       return (
         <div className="bg-white/90 backdrop-blur-md p-4 rounded-2xl shadow-2xl border border-slate-100 ring-1 ring-black/5">
-          <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">{label}</p>
+          <p className="text-xs font-black uppercase tracking-widest text-slate-400 mb-1">{label}</p>
           <p className="text-sm font-black text-slate-900">₹{payload[0].value.toLocaleString()}</p>
         </div>
       );
@@ -3648,7 +3813,7 @@ function ReportsSection({
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 pt-4">
           <div className="space-y-4">
             <div className="space-y-2">
-              <label className="text-[9px] font-black uppercase text-slate-400 ml-1 tracking-widest block">Date Range</label>
+              <label className="text-xs font-black uppercase text-slate-400 ml-1 tracking-widest block">Date Range</label>
               <div className="flex gap-2">
                 <div className="relative flex-1">
                   <Calendar className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
@@ -3693,7 +3858,7 @@ function ReportsSection({
             </div>
           </div>
           <div className="space-y-2">
-            <label className="text-[9px] font-black uppercase text-slate-400 ml-1 tracking-widest block">Category Focus</label>
+            <label className="text-xs font-black uppercase text-slate-400 ml-1 tracking-widest block">Category Focus</label>
             <div className="relative">
               <Package className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
               <select 
@@ -3708,7 +3873,7 @@ function ReportsSection({
             </div>
           </div>
           <div className="space-y-2">
-            <label className="text-[9px] font-black uppercase text-slate-400 ml-1 tracking-widest block">Class Segmentation</label>
+            <label className="text-xs font-black uppercase text-slate-400 ml-1 tracking-widest block">Class Segmentation</label>
             <div className="relative">
               <Users className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
               <select 
@@ -3726,13 +3891,30 @@ function ReportsSection({
       </div>
 
       {!reportReady ? (
-        <div className="bg-slate-50 border-2 border-dashed border-slate-200 rounded-[2.5rem] p-24 flex flex-col items-center justify-center text-center space-y-4">
-           <div className="w-20 h-20 bg-white rounded-3xl flex items-center justify-center text-slate-300 shadow-xl shadow-slate-100 border border-slate-100">
-              <TrendingUp size={40} />
+        <div className="bg-slate-50 border-2 border-dashed border-slate-200 rounded-[2.5rem] py-20 flex flex-col items-center justify-center text-center space-y-6">
+           <div className="relative">
+              <div className="absolute inset-0 bg-blue-100 rounded-full blur-2xl opacity-50 animate-pulse" />
+              <div className="relative w-24 h-24 bg-white rounded-3xl border border-slate-100 flex items-center justify-center text-blue-600 shadow-xl">
+                 <BarChart3 size={40} />
+              </div>
            </div>
-           <div>
-              <h3 className="text-lg font-black text-slate-900 tracking-tight uppercase tracking-widest">Awaiting Command</h3>
-              <p className="text-slate-400 font-bold text-xs uppercase tracking-widest mt-1">Press 'Generate Report' to visualize your filtered data.</p>
+           <div className="space-y-2 max-w-xs px-6">
+              <h3 className="text-xl font-black text-slate-900 tracking-tight">Ready for Intelligence?</h3>
+              <p className="text-slate-500 text-sm font-medium">Click generate to synthesize fresh analytics based on your current filters.</p>
+           </div>
+           <div className="flex flex-col sm:flex-row gap-4 px-6 w-full sm:w-auto">
+              <button 
+                onClick={generateReport}
+                className="px-10 py-4 bg-slate-900 text-white rounded-2xl font-black text-[11px] uppercase tracking-widest shadow-xl shadow-slate-900/20 active:scale-95 transition-all"
+              >
+                Start Analysis
+              </button>
+              <button 
+                onClick={() => setActiveTab('sales')}
+                className="px-10 py-4 bg-white text-slate-500 border border-slate-200 rounded-2xl font-black text-[11px] uppercase tracking-widest hover:bg-slate-50 active:scale-95 transition-all shadow-sm flex items-center justify-center gap-2"
+              >
+                <PlusCircle size={16} /> New Transaction
+              </button>
            </div>
         </div>
       ) : (
@@ -3753,7 +3935,7 @@ function ReportsSection({
                   <stat.icon size={64} />
                 </div>
                 <div className="relative z-10">
-                   <div className="text-[10px] font-black uppercase tracking-[0.2em] text-white/60 mb-2">{stat.label}</div>
+                   <div className="text-xs font-black uppercase tracking-[0.2em] text-white/60 mb-2">{stat.label}</div>
                    <div className="text-2xl font-black text-white font-mono tracking-tighter">{stat.val}</div>
                 </div>
               </div>
@@ -3790,13 +3972,13 @@ function ReportsSection({
                       dataKey="date" 
                       axisLine={false} 
                       tickLine={false} 
-                      tick={{ fontSize: 9, fill: '#94a3b8', fontWeight: 700 }} 
+                      tick={{ fontSize: 10, fill: '#94a3b8', fontWeight: 700 }} 
                       dy={10}
                     />
                     <YAxis 
                       axisLine={false} 
                       tickLine={false} 
-                      tick={{ fontSize: 9, fill: '#94a3b8', fontWeight: 700 }} 
+                      tick={{ fontSize: 10, fill: '#94a3b8', fontWeight: 700 }} 
                     />
                     <Tooltip content={<CustomTooltip />} />
                     <Line 
@@ -3837,7 +4019,7 @@ function ReportsSection({
                       type="category" 
                       axisLine={false} 
                       tickLine={false} 
-                      tick={{ fontSize: 9, fill: '#64748b', fontWeight: 800 }} 
+                      tick={{ fontSize: 10, fill: '#64748b', fontWeight: 800 }} 
                       width={120} 
                     />
                     <Tooltip content={<CustomTooltip />} cursor={{ fill: '#f8fafc' }} />
@@ -3875,13 +4057,13 @@ function ReportsSection({
                       dataKey="name" 
                       axisLine={false} 
                       tickLine={false} 
-                      tick={{ fontSize: 9, fill: '#94a3b8', fontWeight: 800 }} 
+                      tick={{ fontSize: 10, fill: '#94a3b8', fontWeight: 800 }} 
                       dy={10}
                     />
                     <YAxis 
                       axisLine={false} 
                       tickLine={false} 
-                      tick={{ fontSize: 9, fill: '#94a3b8', fontWeight: 800 }} 
+                      tick={{ fontSize: 10, fill: '#94a3b8', fontWeight: 800 }} 
                     />
                     <Tooltip content={<CustomTooltip />} cursor={{ fill: '#f8fafc' }} />
                     <Bar 
@@ -4137,7 +4319,7 @@ function SearchableSelect({
 
   return (
     <div className="relative space-y-1">
-      {label && <label className="text-[9px] font-black uppercase text-slate-400 ml-2 tracking-widest">{label}</label>}
+      {label && <label className="text-xs font-black uppercase text-slate-400 ml-2 tracking-widest">{label}</label>}
       <div 
         onClick={() => !disabled && setIsOpen(!isOpen)}
         className={`w-full px-4 py-3 bg-white border ${isOpen ? 'border-blue-500 ring-4 ring-blue-50' : 'border-slate-200'} rounded-2xl flex items-center justify-between cursor-pointer transition-all ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
@@ -4208,472 +4390,421 @@ function SearchableSelect({
   );
 }
 
-function PriceConfigSection({ pricing, itemOrder, updateItemOrder, handlePriceChange, renameItem, renameSize, addNewItem, deleteItem, addNewSize, deleteSize, newItem, setNewItem, can, exportPricing, importPricing, exportPricingExcel, importPricingExcel, setMsg }: any) {
-  const jsonFileInputRef = useRef<HTMLInputElement>(null);
-  const excelFileInputRef = useRef<HTMLInputElement>(null);
+function UnifiedProductItem({ 
+  item, 
+  pricing, 
+  itemOrder, 
+  handleMove, 
+  handleMoveSize,
+  renameItem, 
+  deleteItem, 
+  selectedItem, 
+  setSelectedItem, 
+  handlePriceChange, 
+  handleStockChange, 
+  handleMinStockChange, 
+  renameSize, 
+  addNewSize, 
+  deleteSize, 
+  can, 
+  setMsg 
+}: any) {
+  const dragControls = useDragControls();
+  const sizes = pricing[item] || {};
+  const sizesArray = Object.entries(sizes);
+  const totalStock = sizesArray.reduce((acc, [_, info]: [any, any]) => acc + (info.stock || 0), 0);
+  const lowStockCount = sizesArray.filter(([_, info]: [any, any]) => info.stock <= (info.minStock || 0)).length;
 
   return (
-    <section className="bg-white rounded-[32px] shadow-xl shadow-slate-200/50 border border-slate-100 overflow-hidden">
-      <div className="bg-slate-900 px-8 py-6 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-        <h2 className="font-black text-white uppercase text-[10px] tracking-[0.2em] flex items-center gap-2">
-          <Tag size={16} className="text-blue-400" />
-          Price Configuration
-        </h2>
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="group relative">
-            <button 
-              onClick={exportPricingExcel}
-              className="flex items-center gap-2 px-5 py-3 bg-slate-800 text-white rounded-2xl text-[9px] font-black uppercase tracking-widest hover:bg-slate-700 transition-all shadow-lg active:scale-95"
-            >
-              <DownloadCloud size={14} /> Export
-            </button>
-            <div className="absolute right-0 top-full mt-2 w-48 bg-white border border-slate-200 rounded-2xl shadow-2xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 overflow-hidden">
-               <button onClick={exportPricingExcel} className="w-full text-left px-4 py-4 text-[10px] font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-2 border-b border-slate-50 text-slate-700">
-                  <FileSpreadsheet size={16} className="text-emerald-500" /> Excel (.xlsx)
-               </button>
-               <button onClick={exportPricing} className="w-full text-left px-4 py-4 text-[10px] font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-2 text-slate-700">
-                  <PackageSearch size={16} className="text-blue-500" /> JSON (.json)
-               </button>
-            </div>
-          </div>
-
-          <button 
-            onClick={exportPricingExcel}
-            className="flex items-center gap-2 px-5 py-3 bg-slate-800 text-white border border-slate-700 rounded-2xl text-[9px] font-black uppercase tracking-widest hover:bg-slate-700 transition-all shadow-lg active:scale-95"
-          >
-            <FileSpreadsheet size={14} className="text-emerald-400" /> Template
-          </button>
-
-          <div className="group relative">
-            <input type="file" accept=".json" ref={jsonFileInputRef} onChange={importPricing} className="hidden" />
-            <input type="file" accept=".xlsx,.xls,.csv" ref={excelFileInputRef} onChange={importPricingExcel} className="hidden" />
-            
-            <button 
-              onClick={() => excelFileInputRef.current?.click()}
-              className="flex items-center gap-2 px-5 py-3 bg-blue-600 text-white rounded-2xl text-[9px] font-black uppercase tracking-widest hover:bg-blue-500 transition-all shadow-lg active:scale-95"
-            >
-              <Upload size={14} /> Import
-            </button>
-            
-            <div className="absolute right-0 top-full mt-2 w-48 bg-white border border-slate-200 rounded-2xl shadow-2xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 overflow-hidden">
-               <button onClick={() => excelFileInputRef.current?.click()} className="w-full text-left px-4 py-4 text-[10px] font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-2 border-b border-slate-50 text-slate-700">
-                  <FileSpreadsheet size={16} className="text-emerald-500" /> Excel (.xlsx)
-               </button>
-               <button onClick={() => jsonFileInputRef.current?.click()} className="w-full text-left px-4 py-4 text-[10px] font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-2 text-slate-700">
-                  <PackageSearch size={16} className="text-blue-500" /> JSON (.json)
-               </button>
-            </div>
-          </div>
-        </div>
-      </div>
+    <Reorder.Item 
+      key={item} 
+      value={item}
+      dragListener={false}
+      dragControls={dragControls}
+      onClick={(e) => {
+        e.stopPropagation();
+        setSelectedItem(item);
+      }}
+      className={`bg-white rounded-[2.5rem] border ${
+        selectedItem === item ? 'border-blue-500 ring-4 ring-blue-50 z-20 shadow-2xl shadow-blue-500/10' : 'border-slate-200'
+      } shadow-sm flex flex-col overflow-hidden transition-all duration-300 hover:shadow-xl hover:shadow-slate-200/50 group/card relative cursor-default`}
+      initial={{ opacity: 0, scale: 0.95 }}
+      animate={{ opacity: 1, scale: 1 }}
+      exit={{ opacity: 0, scale: 0.95 }}
+      whileDrag={{ scale: 1.05, boxShadow: "0 25px 50px -12px rgba(0, 0, 0, 0.15)", zIndex: 100 }}
+    >
+      {/* Visual Accent */}
+      <div className={`absolute top-0 left-0 right-0 h-1.5 transition-colors duration-500 ${
+        selectedItem === item ? 'bg-blue-500' : (lowStockCount > 0 ? 'bg-red-500' : 'bg-slate-100')
+      }`} />
       
-      <div className="p-8 overflow-x-auto custom-scroll">
-        <Reorder.Group 
-          axis="x" 
-          values={itemOrder} 
-          onReorder={updateItemOrder} 
-          className="flex gap-6 min-w-max pb-4"
-        >
-          <AnimatePresence mode="popLayout">
-            {itemOrder.map((item) => {
-              const sizes = pricing[item] || {};
-              return (
-                <Reorder.Item 
-                  key={item} 
-                  value={item}
-                  dragListener={true}
-                  className="w-72 bg-slate-50/50 rounded-[32px] border border-slate-200 flex flex-col overflow-hidden shrink-0 group/item transition-all hover:shadow-2xl hover:shadow-blue-500/5 hover:-translate-y-1 relative"
-                >
-                  {/* Header: Item Name */}
-                  <div className="bg-white px-6 py-5 border-b border-slate-200 flex justify-between items-center cursor-grab active:cursor-grabbing">
-                    <div className="flex items-center gap-3 flex-1">
-                      <div className="p-2 bg-blue-50 text-blue-600 rounded-xl">
-                        <Package size={16} />
-                      </div>
-                      {can('edit') ? (
-                        <div className="relative flex-1 group/input">
-                          <input 
-                            type="text"
-                            defaultValue={item}
-                            aria-label={`Rename item ${item}`}
-                            onBlur={(e) => {
-                              const newVal = e.target.value.trim();
-                              if (newVal && newVal !== item) {
-                                if (pricing[newVal]) {
-                                  setMsg({ type: 'error', text: `Category "${newVal}" already exists.` });
-                                  e.target.value = item;
-                                } else {
-                                  renameItem(item, newVal);
-                                }
-                              } else {
-                                e.target.value = item;
-                              }
-                            }}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') e.currentTarget.blur();
-                              if (e.key === 'Escape') {
-                                e.currentTarget.value = item;
-                                e.currentTarget.blur();
-                              }
-                              e.stopPropagation();
-                            }}
-                            className="text-[11px] font-black text-slate-800 uppercase tracking-widest bg-transparent border-b-2 border-transparent hover:border-blue-100 focus:border-blue-500 focus:bg-blue-50/50 px-1 -ml-1 rounded-md outline-none w-full transition-all cursor-text"
-                          />
-                          <Pencil size={10} className="absolute right-0 top-1/2 -translate-y-1/2 text-slate-300 opacity-0 group-hover/input:opacity-100 pointer-events-none transition-opacity" />
-                        </div>
-                      ) : (
-                        <span className="text-[11px] font-black text-slate-800 uppercase tracking-widest">{item}</span>
-                      )}
-                    </div>
-                    {can('delete') && (
-                      <button 
-                        onClick={() => deleteItem(item)}
-                        aria-label={`Delete ${item}`}
-                        className="text-slate-300 hover:text-red-500 p-2 rounded-xl hover:bg-red-50 transition-all ml-2"
-                      >
-                        <Trash2 size={16} />
-                      </button>
-                    )}
-                  </div>
+      <div className={`p-6 border-b transition-colors duration-300 flex items-center justify-between group/header ${
+        selectedItem === item ? 'bg-blue-50/50 border-blue-100' : 'bg-slate-50/50 border-slate-200'
+      }`}>
+        <div className="flex items-center gap-3 flex-1 overflow-hidden">
+           {/* Precision Controls & Drag Handle */}
+           <div className="flex items-center gap-1.5 p-1 bg-white border border-slate-200 rounded-2xl shadow-sm">
+              <div className="flex gap-0.5">
+                 <button 
+                    onClick={(e) => { e.stopPropagation(); handleMove(item, 'left'); }}
+                    className="p-1.5 hover:bg-blue-50 text-slate-400 hover:text-blue-600 rounded-lg transition-all active:scale-90 disabled:opacity-20"
+                    disabled={itemOrder.indexOf(item) === 0}
+                 >
+                    <ArrowLeft size={12} strokeWidth={3} />
+                 </button>
+                 <button 
+                    onClick={(e) => { e.stopPropagation(); handleMove(item, 'right'); }}
+                    className="p-1.5 hover:bg-blue-50 text-slate-400 hover:text-blue-600 rounded-lg transition-all active:scale-90 disabled:opacity-20"
+                    disabled={itemOrder.indexOf(item) === itemOrder.length - 1}
+                 >
+                    <ArrowRight size={12} strokeWidth={3} />
+                 </button>
+              </div>
+              <div 
+                 className="h-8 w-px bg-slate-100 mx-0.5" 
+              />
+              <div 
+                 onPointerDown={(e) => dragControls.start(e)}
+                 className="p-2.5 text-slate-300 hover:text-blue-500 cursor-grab active:cursor-grabbing transition-colors"
+              >
+                 <GripVertical size={16} />
+              </div>
+           </div>
 
-                  {/* Sub-headings Row */}
-                  <div className="grid grid-cols-2 px-6 py-3 bg-slate-100/50 border-b border-slate-200">
-                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Size</span>
-                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Price (₹)</span>
-                  </div>
+           <div className="flex-1 min-w-0">
+             <input 
+                type="text"
+                defaultValue={item}
+                onBlur={(e) => {
+                  const newVal = e.target.value.trim();
+                  if (newVal && newVal !== item) {
+                    if (pricing[newVal]) {
+                      setMsg({ type: 'error', text: `Category "${newVal}" already exists.` });
+                      e.target.value = item;
+                    } else {
+                      renameItem(item, newVal);
+                    }
+                  } else {
+                    e.target.value = item;
+                  }
+                }}
+                className={`w-full bg-transparent border-0 outline-none text-sm font-black uppercase tracking-tight focus:text-blue-600 transition-colors truncate`}
+             />
+             <div className="flex items-center gap-2 mt-0.5">
+                <span className="text-[10px] font-bold text-slate-400 uppercase">{sizesArray.length} Sizes</span>
+                <span className="w-1 h-1 rounded-full bg-slate-200" />
+                <span className={`text-[10px] font-black uppercase ${totalStock === 0 ? 'text-red-500' : 'text-emerald-500'}`}>
+                  {totalStock} UNIT{totalStock !== 1 ? 'S' : ''}
+                </span>
+             </div>
+           </div>
+        </div>
 
-                  {/* Rows Area */}
-                  <div className="flex-1 overflow-y-auto max-h-[350px] custom-scroll">
-                    {Object.entries(sizes).map(([size, info]: [string, any]) => (
-                      <div key={size} className="grid grid-cols-2 items-center px-6 py-4 border-b border-slate-100 hover:bg-white transition-colors group/row">
-                        {can('edit') ? (
-                          <div className="relative group/input">
-                            <input 
-                              type="text"
-                              defaultValue={size}
-                              onBlur={(e) => {
-                                const newVal = e.target.value.trim();
-                                if (newVal && newVal !== size) {
-                                  if (pricing[item][newVal]) {
-                                    setMsg({ type: 'error', text: `Size "${newVal}" already exists for this item.` });
-                                    e.target.value = size;
-                                  } else {
-                                    renameSize(item, size, newVal);
-                                  }
-                                } else {
-                                  e.target.value = size;
-                                }
-                              }}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter') e.currentTarget.blur();
-                                if (e.key === 'Escape') {
-                                  e.currentTarget.value = size;
-                                  e.currentTarget.blur();
-                                }
-                              }}
-                              className="text-[10px] font-bold text-slate-600 uppercase bg-transparent outline-none border-b-2 border-transparent hover:border-blue-100 focus:border-blue-500 focus:bg-blue-50/50 px-1 -ml-1 rounded-sm transition-all w-full pr-4"
-                            />
-                            <Pencil size={8} className="absolute right-1 top-1/2 -translate-y-1/2 text-slate-300 opacity-0 group-hover/input:opacity-100 pointer-events-none transition-opacity" />
-                          </div>
-                        ) : (
-                          <span className="text-[10px] font-bold text-slate-600 uppercase truncate pr-2">{size}</span>
-                        )}
-                        
-                        <div className="flex items-center justify-end gap-1 relative">
-                          {can('edit') ? (
-                            <input 
-                              type="number" 
-                              value={info.price}
-                              onChange={(e) => handlePriceChange(item, size, Number(e.target.value))}
-                              className="w-20 text-right text-[11px] font-black text-slate-900 bg-slate-100/50 px-3 py-2 rounded-xl outline-none focus:bg-blue-50 focus:ring-4 focus:ring-blue-100 transition-all"
-                            />
-                          ) : (
-                            <span className="text-[11px] font-black text-slate-900">{info.price}</span>
-                          )}
-                          {can('delete') && (
-                            <button 
-                              onClick={() => deleteSize(item, size)}
-                              className="absolute -right-5 text-slate-200 hover:text-red-500 opacity-0 group-hover/row:opacity-100 transition-all p-1"
-                            >
-                              <X size={10} />
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                    
-                    {Object.entries(sizes).length === 0 && (
-                      <div className="flex flex-col items-center justify-center py-12 px-6 text-center space-y-2 opacity-40">
-                        <Hash size={24} className="text-slate-300" />
-                        <p className="text-[10px] font-bold uppercase tracking-widest">No sizes added</p>
-                      </div>
-                    )}
-                  </div>
+        {can('delete') && (
+           <button 
+             onClick={(e) => { e.stopPropagation(); deleteItem(item); }}
+             className="p-2 hover:bg-red-50 text-slate-300 hover:text-red-500 transition-all rounded-xl"
+           >
+             <Trash2 size={16} />
+           </button>
+        )}
+      </div>
 
-                  {/* Footer: Add New Size Form */}
-                  {can('add') && (
-                    <form 
-                      onSubmit={(e) => addNewSize(item, e)}
-                      className="p-5 bg-white border-t border-slate-200"
+      <div className="flex-1 p-6 space-y-4 max-h-[300px] overflow-y-auto custom-scroll">
+        {sizesArray.map(([size, info]: [string, any], idx: number) => (
+          <div key={size} className="flex flex-col gap-3 p-4 bg-slate-50/50 rounded-2xl border border-slate-100 group/size hover:bg-white hover:border-blue-100 hover:shadow-sm transition-all">
+            <div className="flex justify-between items-center">
+              <div className="flex items-center gap-2">
+                 <div className="flex flex-col gap-1 opacity-0 group-hover/size:opacity-100 transition-opacity">
+                    <button 
+                      onClick={() => handleMoveSize(item, size, 'up')}
+                      disabled={idx === 0}
+                      className="text-slate-300 hover:text-blue-600 disabled:opacity-10"
                     >
-                      <div className="flex gap-2">
-                        <input name="size" placeholder="SIZE" className="w-16 px-3 py-2 text-[10px] uppercase font-black bg-slate-50 border border-slate-100 rounded-xl outline-none focus:ring-4 focus:ring-blue-50 focus:border-blue-500 focus:bg-white transition-all text-center" required />
-                        <input name="price" type="number" placeholder="PRICE ₹" className="flex-1 px-3 py-2 text-[10px] font-bold bg-slate-50 border border-slate-100 rounded-xl outline-none focus:ring-4 focus:ring-blue-50 focus:border-blue-500 focus:bg-white transition-all" required />
-                        <button type="submit" className="bg-blue-600 text-white p-2.5 rounded-xl hover:bg-blue-700 transition-all active:scale-95 shadow-lg shadow-blue-500/20">
-                          <Plus size={14} strokeWidth={3} />
-                        </button>
-                      </div>
-                    </form>
-                  )}
-                </Reorder.Item>
-              );
-            })}
-          </AnimatePresence>
-
-          {/* Add New Item Column Form */}
-          {can('add') && (
-            <div className="w-72 bg-slate-50 border-2 border-dashed border-slate-200 rounded-[32px] flex flex-col shrink-0 overflow-hidden hover:border-blue-300 hover:bg-blue-50/20 transition-all group/newitem">
-               <div className="flex-1 flex flex-col items-center justify-center p-8 text-center space-y-4">
-                  <div className="w-14 h-14 bg-white rounded-2xl flex items-center justify-center text-slate-300 shadow-sm border border-slate-100 group-hover/newitem:text-blue-500 group-hover/newitem:scale-110 group-hover/newitem:shadow-lg transition-all">
-                    <PlusCircle size={28} strokeWidth={1.5} />
-                  </div>
-                  <div>
-                     <h3 className="text-xs font-black text-slate-800 uppercase tracking-widest mb-1">New Category</h3>
-                     <p className="text-[10px] text-slate-400 font-medium">Extend your product range</p>
-                  </div>
-                  <form onSubmit={addNewItem} className="w-full space-y-3">
-                    <input 
-                      name="itemName"
-                      placeholder="Item Name (e.g. Tie)"
-                      className="w-full px-5 py-4 text-xs text-center border-2 border-slate-100 rounded-2xl bg-white focus:border-blue-500 focus:ring-8 focus:ring-blue-50 outline-none transition-all font-semibold shadow-sm"
-                      required
-                    />
-                    <button type="submit" className="w-full bg-slate-900 text-white font-black text-[10px] py-4 rounded-2xl tracking-[0.2em] hover:bg-blue-600 transition-all shadow-xl active:scale-95 uppercase">
-                      INITIALIZE COLUMN
+                      <ChevronUp size={10} />
                     </button>
-                  </form>
+                    <button 
+                      onClick={() => handleMoveSize(item, size, 'down')}
+                      disabled={idx === sizesArray.length - 1}
+                      className="text-slate-300 hover:text-blue-600 disabled:opacity-10"
+                    >
+                      <ChevronDown size={10} />
+                    </button>
+                 </div>
+                 <input 
+                  type="text"
+                  defaultValue={size}
+                  onBlur={(e) => {
+                    const newVal = e.target.value.trim();
+                    if (newVal && newVal !== size) {
+                      renameSize(item, size, newVal);
+                    } else {
+                      e.target.value = size;
+                    }
+                  }}
+                  className="text-[10px] font-black uppercase tracking-widest text-slate-400 focus:text-blue-600 outline-none bg-transparent"
+                />
+              </div>
+              <button 
+                onClick={() => deleteSize(item, size)}
+                className="opacity-0 group-hover/size:opacity-100 p-1.5 hover:bg-red-50 text-red-400 hover:text-red-600 rounded-lg transition-all"
+              >
+                <X size={12} />
+              </button>
+            </div>
+            
+            <div className="grid grid-cols-2 gap-4">
+               <div className="space-y-1">
+                  <span className="text-[8px] font-black uppercase text-slate-400 tracking-tighter">Rate</span>
+                  <div className="relative">
+                    <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[10px] font-bold text-slate-300">₹</span>
+                    <input 
+                      type="number"
+                      value={info.price}
+                      onChange={(e) => handlePriceChange(item, size, Number(e.target.value))}
+                      className="w-full pl-6 pr-3 py-2 bg-white border border-slate-200 rounded-xl text-xs font-black outline-none focus:border-blue-500 transition-all"
+                    />
+                  </div>
+               </div>
+               <div className="space-y-1">
+                  <div className="flex justify-between items-center">
+                    <span className="text-[8px] font-black uppercase text-slate-400 tracking-tighter">Stock</span>
+                    {info.stock <= (info.minStock || 0) && (
+                      <AlertCircle size={10} className="text-red-500 animate-pulse" />
+                    )}
+                  </div>
+                  <input 
+                    type="number"
+                    value={info.stock}
+                    onChange={(e) => handleStockChange(item, size, Number(e.target.value))}
+                    className={`w-full px-3 py-2 bg-white border rounded-xl text-xs font-black outline-none focus:border-blue-500 transition-all ${
+                      info.stock <= (info.minStock || 0) ? 'border-red-200 bg-red-50/10' : 'border-slate-200'
+                    }`}
+                  />
                </div>
             </div>
-          )}
-        </Reorder.Group>
+
+            <div className="pt-2 border-t border-slate-100 flex items-center justify-between">
+               <div className="flex items-center gap-2">
+                  <span className="text-[8px] font-black uppercase text-slate-300 tracking-tighter">Min Limit</span>
+                  <input 
+                    type="number"
+                    value={info.minStock || 0}
+                    onChange={(e) => handleMinStockChange(item, size, Number(e.target.value))}
+                    className="w-12 py-1 bg-transparent text-[10px] font-black text-slate-500 outline-none"
+                  />
+               </div>
+               <div className={`text-[9px] font-black uppercase px-2 py-0.5 rounded-md ${
+                 info.stock > (info.minStock || 0) ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-600'
+               }`}>
+                 {info.stock > (info.minStock || 0) ? 'IN STOCK' : 'LOW'}
+               </div>
+            </div>
+          </div>
+        ))}
+        
+        {can('edit') && (
+          <button 
+            onClick={() => addNewSize(item)}
+            className="w-full py-3 border-2 border-dashed border-slate-100 rounded-2xl text-[10px] font-black uppercase tracking-widest text-slate-400 hover:border-blue-200 hover:text-blue-500 transition-all active:scale-[0.98]"
+          >
+            + New Size
+          </button>
+        )}
       </div>
-    </section>
+    </Reorder.Item>
   );
 }
 
-function InventoryConfigSection({ pricing, itemOrder, handleStockChange, handleMinStockChange, can, exportPricing, importPricing, exportPricingExcel, importPricingExcel, renameItem, renameSize, setMsg }: any) {
+function UnifiedProductSection({ 
+  pricing, 
+  itemOrder, 
+  updateItemOrder, 
+  handleMove,
+  handleMoveSize,
+  handlePriceChange, 
+  handleStockChange, 
+  handleMinStockChange,
+  renameItem, 
+  renameSize, 
+  addNewItem, 
+  deleteItem, 
+  addNewSize, 
+  deleteSize, 
+  can, 
+  exportPricing, 
+  importPricing, 
+  exportPricingExcel, 
+  importPricingExcel, 
+  downloadPricingTemplate,
+  setMsg 
+}: any) {
+  const [searchTerm, setSearchTerm] = useState('');
+  const [filterLowStock, setFilterLowStock] = useState(false);
+  const [selectedItem, setSelectedItem] = useState<string | null>(null);
   const jsonFileInputRef = useRef<HTMLInputElement>(null);
   const excelFileInputRef = useRef<HTMLInputElement>(null);
 
+  const filteredItems = itemOrder.filter((item: string) => {
+    const matchesSearch = item.toLowerCase().includes(searchTerm.toLowerCase());
+    if (!filterLowStock) return matchesSearch;
+    
+    // Check if any size is low stock
+    const sizes = pricing[item] || {};
+    const hasLowStock = Object.values(sizes).some((info: any) => info.stock <= (info.minStock || 0));
+    return matchesSearch && hasLowStock;
+  });
+
   return (
-    <section className="bg-white rounded-[32px] shadow-xl shadow-slate-200/50 border border-slate-100 overflow-hidden">
-      <div className="bg-slate-900 px-8 py-6 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-        <h2 className="font-black text-white uppercase text-[10px] tracking-[0.2em] flex items-center gap-2">
-          <Package size={16} className="text-orange-400" />
-          Inventory Management
-        </h2>
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="group relative">
-            <button 
-              onClick={exportPricingExcel}
-              className="flex items-center gap-2 px-5 py-3 bg-slate-800 text-white rounded-2xl text-[9px] font-black uppercase tracking-widest hover:bg-slate-700 transition-all shadow-lg active:scale-95"
-            >
-              <DownloadCloud size={14} /> Export
-            </button>
-            <div className="absolute right-0 top-full mt-2 w-48 bg-white border border-slate-200 rounded-2xl shadow-2xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 overflow-hidden">
-               <button onClick={exportPricingExcel} className="w-full text-left px-4 py-4 text-[10px] font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-2 border-b border-slate-50 text-slate-700">
-                  <FileSpreadsheet size={16} className="text-emerald-500" /> Excel (.xlsx)
-               </button>
-               <button onClick={exportPricing} className="w-full text-left px-4 py-4 text-[10px] font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-2 text-slate-700">
-                  <PackageSearch size={16} className="text-blue-500" /> JSON (.json)
-               </button>
-            </div>
+    <div className="space-y-8 pb-20" onClick={() => setSelectedItem(null)}>
+      {/* Product Hub Header */}
+      <div className="bg-white rounded-[2.5rem] p-8 border border-slate-200 shadow-sm relative overflow-visible">
+        <div className="absolute top-0 right-0 w-64 h-64 bg-blue-50 rounded-full blur-3xl -mr-32 -mt-32 opacity-50 pointer-events-none" />
+        
+        <div className="relative z-10 flex flex-col lg:flex-row justify-between items-start lg:items-center gap-8">
+          <div className="space-y-1">
+             <h2 className="text-3xl font-black text-slate-900 tracking-tight flex items-center gap-3">
+               Product Console
+               <span className="px-3 py-1 bg-slate-900 text-white text-xs font-black uppercase tracking-[0.2em] rounded-full">
+                 V4.0
+               </span>
+             </h2>
+             <p className="text-slate-500 font-medium">Manage pricing, inventory, and catalog structure.</p>
           </div>
 
-          <button 
-            onClick={exportPricingExcel}
-            className="flex items-center gap-2 px-5 py-3 bg-slate-800 text-white border border-slate-700 rounded-2xl text-[9px] font-black uppercase tracking-widest hover:bg-slate-700 transition-all shadow-lg active:scale-95"
-          >
-            <FileSpreadsheet size={14} className="text-emerald-400" /> Template
-          </button>
-
-          <div className="group relative">
-            <input type="file" accept=".json" ref={jsonFileInputRef} onChange={importPricing} className="hidden" />
-            <input type="file" accept=".xlsx,.xls,.csv" ref={excelFileInputRef} onChange={importPricingExcel} className="hidden" />
-            
-            <button 
-              onClick={() => excelFileInputRef.current?.click()}
-              className="flex items-center gap-2 px-5 py-3 bg-orange-600 text-white rounded-2xl text-[9px] font-black uppercase tracking-widest hover:bg-orange-500 transition-all shadow-lg active:scale-95"
-            >
-              <Upload size={14} /> Import
-            </button>
-            
-            <div className="absolute right-0 top-full mt-2 w-48 bg-white border border-slate-200 rounded-2xl shadow-2xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 overflow-hidden">
-               <button onClick={() => excelFileInputRef.current?.click()} className="w-full text-left px-4 py-4 text-[10px] font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-2 border-b border-slate-50 text-slate-700">
-                  <FileSpreadsheet size={16} className="text-emerald-500" /> Excel (.xlsx)
-               </button>
-               <button onClick={() => jsonFileInputRef.current?.click()} className="w-full text-left px-4 py-4 text-[10px] font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-2 text-slate-700">
-                  <PackageSearch size={16} className="text-blue-500" /> JSON (.json)
-               </button>
+          <div className="flex flex-wrap items-center gap-3 w-full lg:w-auto">
+            <div className="relative flex-1 lg:w-64">
+              <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+              <input 
+                type="text"
+                placeholder="Search products..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="w-full pl-11 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-xs font-bold focus:ring-4 focus:ring-blue-50 focus:bg-white focus:border-blue-500 outline-none transition-all"
+              />
             </div>
-          </div>
-          
-          <div className="h-6 w-px bg-slate-700 mx-2 hidden md:block" />
 
-          <div className="flex items-center gap-4 text-[10px] font-black uppercase text-slate-400">
-            <div className="flex items-center gap-1.5"><div className="w-2 h-2 rounded-full bg-red-500" /> Low Stock</div>
-            <div className="flex items-center gap-1.5"><div className="w-2 h-2 rounded-full bg-slate-200" /> Sufficient</div>
+            <button 
+              onClick={() => setFilterLowStock(!filterLowStock)}
+              className={`px-5 py-3 rounded-2xl text-xs font-black uppercase tracking-widest flex items-center gap-2 transition-all border ${
+                filterLowStock 
+                  ? 'bg-red-50 text-red-600 border-red-200 shadow-lg shadow-red-500/10' 
+                  : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
+              }`}
+            >
+              <AlertCircle size={14} /> {filterLowStock ? 'LOW STOCK ONLY' : 'ALL STOCK'}
+            </button>
+
+            <div className="h-8 w-px bg-slate-200 hidden lg:block" />
+
+            <div className="group relative z-30">
+               <button className="w-full lg:w-auto px-5 py-3 bg-slate-900 text-white rounded-2xl text-xs font-black uppercase tracking-widest hover:bg-slate-800 transition-all flex items-center justify-center gap-2 shadow-lg shadow-slate-900/10">
+                 <DownloadCloud size={14} /> Catalog
+               </button>
+               <div className="absolute right-0 top-full mt-2 w-48 bg-white border border-slate-200 rounded-2xl shadow-2xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 overflow-hidden transform translate-y-2 group-hover:translate-y-0">
+                  <button onClick={exportPricingExcel} className="w-full text-left px-5 py-4 text-xs font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-3 text-slate-700 border-b border-slate-100">
+                     <FileSpreadsheet size={18} className="text-emerald-500" /> Excel (.xlsx)
+                  </button>
+                  <button onClick={exportPricing} className="w-full text-left px-5 py-4 text-xs font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-3 text-slate-700">
+                     <Database size={18} className="text-blue-500" /> JSON Format
+                  </button>
+               </div>
+            </div>
+            
+            <div className="group relative z-30">
+               <input type="file" accept=".json" ref={jsonFileInputRef} onChange={importPricing} className="hidden" />
+               <input type="file" accept=".xlsx,.xls,.csv" ref={excelFileInputRef} onChange={importPricingExcel} className="hidden" />
+               <button className="w-full lg:w-auto px-5 py-3 bg-blue-600 text-white rounded-2xl text-xs font-black uppercase tracking-widest hover:bg-blue-700 transition-all flex items-center justify-center gap-2 shadow-lg shadow-blue-600/10 active:scale-95">
+                 <Upload size={14} /> Import
+               </button>
+               <div className="absolute right-0 top-full mt-2 w-48 bg-white border border-slate-200 rounded-2xl shadow-2xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 overflow-hidden transform translate-y-2 group-hover:translate-y-0">
+                  <button onClick={downloadPricingTemplate} className="w-full text-left px-5 py-4 text-xs font-black uppercase hover:bg-blue-50 transition-colors flex items-center gap-3 text-blue-600 border-b border-slate-100 font-mono">
+                     <FileDown size={18} /> Get Template
+                  </button>
+                  <button onClick={() => excelFileInputRef.current?.click()} className="w-full text-left px-5 py-4 text-xs font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-3 text-slate-700 border-b border-slate-100">
+                     <FileSpreadsheet size={18} className="text-emerald-500" /> From Spreadsheet
+                  </button>
+                  <button onClick={() => jsonFileInputRef.current?.click()} className="w-full text-left px-5 py-4 text-xs font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-3 text-slate-700">
+                     <Database size={18} className="text-blue-500" /> From JSON
+                  </button>
+               </div>
+            </div>
           </div>
         </div>
       </div>
-      
-      <div className="p-8 overflow-x-auto custom-scroll">
-        <div className="flex gap-6 min-w-max pb-4">
-          <AnimatePresence mode="popLayout">
-            {itemOrder.map((item: string) => {
-              const sizes = pricing[item] || {};
-              return (
-                <motion.div 
-                  key={item} 
-                  layout
-                  initial={{ opacity: 0, scale: 0.95 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.9 }}
-                  className="w-72 bg-slate-50/50 rounded-[32px] border border-slate-200 flex flex-col overflow-hidden shrink-0 group/item transition-all hover:shadow-2xl hover:shadow-orange-500/5 hover:-translate-y-1"
-                >
-                  {/* Header: Item Name */}
-                  <div className="bg-white px-6 py-5 border-b border-slate-200 flex justify-between items-center">
-                    <div className="flex items-center gap-3 flex-1">
-                      <div className="p-2 bg-orange-50 text-orange-600 rounded-xl">
-                        <Package size={16} />
-                      </div>
-                      {can('edit') ? (
-                        <div className="relative flex-1 group/input">
-                          <input 
-                            type="text"
-                            defaultValue={item}
-                            aria-label={`Rename item ${item}`}
-                            onBlur={(e) => {
-                              const newVal = e.target.value.trim();
-                              if (newVal && newVal !== item) {
-                                if (pricing[newVal]) {
-                                  setMsg({ type: 'error', text: `Category "${newVal}" already exists.` });
-                                  e.target.value = item;
-                                } else {
-                                  renameItem(item, newVal);
-                                }
-                              } else {
-                                e.target.value = item;
-                              }
-                            }}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') e.currentTarget.blur();
-                              if (e.key === 'Escape') {
-                                e.currentTarget.value = item;
-                                e.currentTarget.blur();
-                              }
-                            }}
-                            className="text-[11px] font-black text-slate-800 uppercase tracking-widest bg-transparent border-b-2 border-transparent hover:border-orange-100 focus:border-orange-500 focus:bg-orange-50/50 px-1 -ml-1 rounded-md outline-none w-full transition-all cursor-text"
-                          />
-                          <Pencil size={10} className="absolute right-0 top-1/2 -translate-y-1/2 text-slate-300 opacity-0 group-hover/input:opacity-100 pointer-events-none transition-opacity" />
-                        </div>
-                      ) : (
-                        <span className="text-[11px] font-black text-slate-800 uppercase tracking-widest">{item}</span>
-                      )}
-                    </div>
-                  </div>
 
-                  {/* Sub-headings Row */}
-                  <div className="grid grid-cols-3 px-6 py-3 bg-slate-100/50 border-b border-slate-200">
-                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Size</span>
-                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">Stock</span>
-                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Min</span>
-                  </div>
+      {/* Main Grid View */}
+      <Reorder.Group axis="y" values={itemOrder} onReorder={updateItemOrder} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+        <AnimatePresence mode="popLayout">
+          {filteredItems.map((item: string) => (
+            <UnifiedProductItem 
+              key={item}
+              item={item}
+              pricing={pricing}
+              itemOrder={itemOrder}
+              handleMove={handleMove}
+              handleMoveSize={handleMoveSize}
+              renameItem={renameItem}
+              deleteItem={deleteItem}
+              selectedItem={selectedItem}
+              setSelectedItem={setSelectedItem}
+              handlePriceChange={handlePriceChange}
+              handleStockChange={handleStockChange}
+              handleMinStockChange={handleMinStockChange}
+              renameSize={renameSize}
+              addNewSize={addNewSize}
+              deleteSize={deleteSize}
+              can={can}
+              setMsg={setMsg}
+            />
+          ))}
+        </AnimatePresence>
 
-                  {/* Rows Area */}
-                  <div className="flex-1 overflow-y-auto max-h-[350px] custom-scroll">
-                    {Object.entries(sizes).map(([size, info]: [string, any]) => {
-                      const isLowStock = info.stock <= (info.minStock || 0);
-                      return (
-                        <div key={size} className="grid grid-cols-3 items-center px-6 py-4 border-b border-slate-100 hover:bg-white transition-colors group/row">
-                          {can('edit') ? (
-                            <div className="relative group/input">
-                              <input 
-                                type="text"
-                                defaultValue={size}
-                                onBlur={(e) => {
-                                  const newVal = e.target.value.trim();
-                                  if (newVal && newVal !== size) {
-                                    if (pricing[item][newVal]) {
-                                      setMsg({ type: 'error', text: `Size "${newVal}" already exists for this item.` });
-                                      e.target.value = size;
-                                    } else {
-                                      renameSize(item, size, newVal);
-                                    }
-                                  } else {
-                                    e.target.value = size;
-                                  }
-                                }}
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Enter') e.currentTarget.blur();
-                                  if (e.key === 'Escape') {
-                                    e.currentTarget.value = size;
-                                    e.currentTarget.blur();
-                                  }
-                                }}
-                                className="text-[10px] font-bold text-slate-600 uppercase bg-transparent outline-none border-b-2 border-transparent hover:border-orange-100 focus:border-orange-500 focus:bg-orange-50/50 px-1 -ml-1 rounded-sm transition-all w-full pr-4"
-                              />
-                              <Pencil size={8} className="absolute right-1 top-1/2 -translate-y-1/2 text-slate-300 opacity-0 group-hover/input:opacity-100 pointer-events-none transition-opacity" />
-                            </div>
-                          ) : (
-                            <span className="text-[10px] font-bold text-slate-600 uppercase truncate pr-2">{size}</span>
-                          )}
-                          
-                          <div className="flex justify-center">
-                            {can('edit') ? (
-                              <input 
-                                type="number" 
-                                value={info.stock}
-                                onChange={(e) => handleStockChange(item, size, Number(e.target.value))}
-                                className={`w-16 text-center text-[11px] font-black px-2 py-1.5 rounded-lg outline-none focus:ring-4 transition-all ${
-                                  isLowStock ? 'bg-red-50 text-red-600 focus:ring-red-100' : 'bg-slate-100/50 text-slate-900 focus:ring-slate-100'
-                                }`}
-                              />
-                            ) : (
-                              <span className={`text-[11px] font-black ${isLowStock ? 'text-red-500' : 'text-slate-900'}`}>{info.stock}</span>
-                            )}
-                          </div>
 
-                          <div className="flex justify-end">
-                            {can('edit') ? (
-                              <input 
-                                type="number" 
-                                value={info.minStock || 0}
-                                onChange={(e) => handleMinStockChange(item, size, Number(e.target.value))}
-                                className="w-14 text-right text-[10px] font-bold text-slate-400 bg-transparent outline-none focus:text-blue-600 transition-all"
-                              />
-                            ) : (
-                              <span className="text-[10px] font-bold text-slate-400">{info.minStock || 0}</span>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })}
-                    
-                    {Object.entries(sizes).length === 0 && (
-                      <div className="flex flex-col items-center justify-center py-12 px-6 text-center space-y-2 opacity-40">
-                        <Package size={24} className="text-slate-300" />
-                        <p className="text-[10px] font-bold uppercase tracking-widest">No sizes added</p>
-                      </div>
-                    )}
-                  </div>
-                </motion.div>
-              );
-            })}
-          </AnimatePresence>
+
+        {/* Add Category Card */}
+        <div className="bg-slate-50 rounded-[2.5rem] border-2 border-dashed border-slate-200 flex items-center justify-center p-8 group/additem hover:border-blue-300 hover:bg-blue-50/50 transition-all">
+          <div className="w-full max-w-[240px] space-y-6 text-center">
+             <div className="w-16 h-16 bg-white border border-slate-200 rounded-[2rem] flex items-center justify-center mx-auto shadow-sm group-hover/additem:shadow-xl group-hover/additem:scale-110 group-hover/additem:rotate-12 transition-all">
+                <PlusCircle size={32} className="text-slate-300 group-hover/additem:text-blue-600" />
+             </div>
+             <div className="space-y-1">
+                <h3 className="text-xs font-black uppercase tracking-widest text-slate-900">New Product Hub</h3>
+                <p className="text-xs text-slate-400 font-medium leading-relaxed">Initialize a new category with custom variants and stock logic.</p>
+             </div>
+             <form onSubmit={addNewItem} className="space-y-3">
+                <input 
+                  name="itemName" 
+                  placeholder="EX: TRACKSUIT" 
+                  className="w-full px-5 py-4 bg-white border border-slate-200 rounded-[1.5rem] text-xs font-black uppercase tracking-widest outline-none focus:border-blue-500 focus:ring-8 focus:ring-blue-500/5 transition-all shadow-sm"
+                  required
+                />
+                <button type="submit" className="w-full py-4 bg-slate-900 text-white rounded-[1.5rem] text-xs font-black uppercase tracking-[0.2em] hover:bg-blue-600 transition-all shadow-xl active:scale-95 flex items-center justify-center gap-2">
+                  <PackagePlus size={14} /> CREATE HUB
+                </button>
+             </form>
+          </div>
         </div>
-      </div>
-    </section>
+      </Reorder.Group>
+
+      {searchTerm && filteredItems.length === 0 && (
+         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex flex-col items-center justify-center py-20 bg-white border border-slate-200 rounded-[2.5rem] text-center space-y-4">
+            <div className="w-20 h-20 bg-slate-50 rounded-full flex items-center justify-center text-slate-300">
+              <SearchX size={40} />
+            </div>
+            <div className="space-y-1">
+              <h3 className="text-sm font-black uppercase tracking-widest text-slate-900">No matches found</h3>
+              <p className="text-xs text-slate-500 font-medium">Try adjusting your search or filters.</p>
+            </div>
+            <button 
+              onClick={() => { setSearchTerm(''); setFilterLowStock(false); }}
+              className="text-xs font-black text-blue-600 uppercase tracking-widest hover:underline"
+            >
+              Clear all filters
+            </button>
+         </motion.div>
+      )}
+    </div>
   );
 }
 
@@ -4683,16 +4814,18 @@ function SalesFormSection({
   setCustomValues, discountAmount, setDiscountAmount, finalPayable, addToCart, cart, cartTotal, removeFromCart, onSubmitClick, 
   paymentMode, setPaymentMode, paidAmount, setPaidAmount, paymentDate, setPaymentDate,
   addCustomField, removeCustomField, updateCustomField, recentRecords, can,
-  isAnalyzing, importFromSpreadsheet, summarizeNotes, isSummarizing
+  exportPricing, importPricing, importPricingExcel
 }: any) {
   const [activeStep, setActiveStep] = useState(1);
   const [showAddedMsg, setShowAddedMsg] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const jsonFileInputRef = useRef<HTMLInputElement>(null);
+  const excelFileInputRef = useRef<HTMLInputElement>(null);
 
   const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      importFromSpreadsheet(file);
+      // Manual import fallback or just remove if not needed
     }
   };
 
@@ -4728,53 +4861,97 @@ function SalesFormSection({
         </div>
 
         <div className="flex items-center gap-4">
-          <input 
-            type="file" 
-            ref={fileInputRef} 
-            onChange={handleImport} 
-            className="hidden" 
-            accept=".csv,.xlsx,.xls"
-          />
-          <button 
-            onClick={() => fileInputRef.current?.click()}
-            disabled={isAnalyzing}
-            className="flex items-center gap-2 bg-white border border-slate-200 px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest text-slate-600 hover:bg-slate-50 transition-all disabled:opacity-50"
-          >
-            {isAnalyzing ? (
-              <Loader2 className="animate-spin" size={12} />
-            ) : (
-              <Upload size={12} />
-            )}
-            {isAnalyzing ? 'Analyzing...' : 'AI Import'}
-          </button>
-          
-          {/* Modern Step Indicator */}
-          <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-2xl border border-slate-200">
+          <div className="flex items-center gap-2 bg-white p-1 rounded-2xl border border-slate-200 shadow-sm">
+            <div className="group relative z-30">
+               <button className="px-5 py-3 bg-slate-900 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-slate-800 transition-all flex items-center gap-2 shadow-lg shadow-slate-900/10">
+                 <DownloadCloud size={14} /> Catalog
+               </button>
+               <div className="absolute right-0 top-full mt-2 w-48 bg-white border border-slate-200 rounded-2xl shadow-2xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 overflow-hidden transform translate-y-2 group-hover:translate-y-0">
+                  <button onClick={() => exportPricing('xlsx')} className="w-full text-left px-5 py-4 text-[10px] font-black uppercase text-slate-600 hover:bg-slate-50 transition-colors flex items-center gap-2 border-b border-slate-100">
+                    <FileSpreadsheet size={16} className="text-emerald-500" /> Export Excel
+                  </button>
+                  <button onClick={() => exportPricing('json')} className="w-full text-left px-5 py-4 text-[10px] font-black uppercase text-slate-600 hover:bg-slate-50 transition-colors flex items-center gap-2">
+                    <Database size={16} className="text-blue-500" /> Export JSON
+                  </button>
+               </div>
+            </div>
+            
+            <div className="group relative z-30">
+               <input type="file" accept=".json" ref={jsonFileInputRef} onChange={importPricing} className="hidden" />
+               <input type="file" accept=".xlsx,.xls,.csv" ref={excelFileInputRef} onChange={importPricingExcel} className="hidden" />
+               <button className="px-5 py-3 bg-blue-600 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-blue-700 transition-all flex items-center gap-2 shadow-lg shadow-blue-600/10 active:scale-95">
+                 <Upload size={14} /> Import
+               </button>
+               <div className="absolute right-0 top-full mt-2 w-48 bg-white border border-slate-200 rounded-2xl shadow-2xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 overflow-hidden transform translate-y-2 group-hover:translate-y-0">
+                  <button onClick={() => jsonFileInputRef.current?.click()} className="w-full text-left px-5 py-4 text-[10px] font-black uppercase text-slate-600 hover:bg-slate-50 transition-colors flex items-center gap-2 border-b border-slate-100">
+                    <Database size={16} className="text-blue-500" /> Import JSON
+                  </button>
+                  <button onClick={() => excelFileInputRef.current?.click()} className="w-full text-left px-5 py-4 text-[10px] font-black uppercase text-slate-600 hover:bg-slate-50 transition-colors flex items-center gap-2">
+                    <FileSpreadsheet size={16} className="text-emerald-500" /> Import Excel
+                  </button>
+               </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Immersive Steps Navigation */}
+      <div className="flex justify-center -mt-4">
+        <div className="flex items-center gap-1 bg-white p-1.5 rounded-[20px] border border-slate-200 shadow-sm">
           {steps.map((step) => (
             <div 
               key={step.id}
               onClick={() => setActiveStep(step.id)}
-              className={`flex items-center gap-2 px-4 py-2 rounded-xl transition-all duration-300 cursor-pointer ${
+              className={`flex items-center gap-2 px-5 py-2.5 rounded-[14px] transition-all duration-300 cursor-pointer ${
                 activeStep === step.id 
-                  ? 'bg-white text-blue-600 shadow-sm ring-1 ring-slate-200 shadow-slate-200' 
-                  : 'text-slate-400 hover:text-slate-600'
+                  ? 'bg-blue-600 text-white shadow-xl shadow-blue-500/20' 
+                  : 'text-slate-400 hover:text-slate-600 hover:bg-slate-50'
               }`}
             >
               <div className={`w-5 h-5 rounded-lg flex items-center justify-center text-[10px] font-black ${
-                activeStep === step.id ? 'bg-blue-600 text-white' : 'bg-slate-200 text-slate-500'
+                activeStep === step.id ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-500'
               }`}>
                 {step.id}
               </div>
-              <span className="text-[10px] font-black uppercase tracking-widest hidden sm:block">{step.name}</span>
+              <span className={`text-[10px] font-black uppercase tracking-widest transition-all ${
+                activeStep === step.id ? 'opacity-100 translate-x-0' : 'opacity-0 -translate-x-2 hidden sm:block'
+              }`}>
+                {step.name}
+              </span>
             </div>
           ))}
-          </div>
         </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
         {/* Main Form Area */}
         <div className="lg:col-span-8 space-y-6">
+          {/* Mobile Quick Actions */}
+          <div className="lg:hidden flex gap-3 sticky top-20 z-40">
+             <button 
+               onClick={() => {
+                  const summary = document.getElementById('billing-summary');
+                  if (summary) summary.scrollIntoView({ behavior: 'smooth', block: 'start' });
+               }}
+               className="flex-1 bg-slate-900 text-white px-4 py-4 rounded-2xl flex items-center justify-between shadow-xl ring-4 ring-slate-900/10 active:scale-95 transition-all"
+             >
+                <div className="flex items-center gap-2">
+                   <div className="relative">
+                      <ShoppingBag size={16} />
+                      {cart.length > 0 && <span className="absolute -top-2 -right-2 w-4 h-4 bg-blue-600 rounded-full flex items-center justify-center text-[8px] font-black">{cart.length}</span>}
+                   </div>
+                   <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">View Cart</span>
+                </div>
+                <span className="text-sm font-black font-mono tracking-tighter">₹ {cartTotal}</span>
+             </button>
+             <button 
+               onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+               className="w-14 bg-white border border-slate-200 text-slate-400 rounded-2xl flex items-center justify-center shadow-lg active:scale-95 transition-all"
+             >
+                <ArrowUp size={18} />
+             </button>
+          </div>
+
           <section className="bg-white rounded-[32px] shadow-xl shadow-slate-200/50 border border-slate-100 overflow-hidden">
             <div className="bg-slate-900 px-8 py-6 text-white flex justify-between items-center group">
               <div className="flex items-center gap-4">
@@ -4862,7 +5039,7 @@ function SalesFormSection({
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                   <div className="space-y-3">
                     <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">Serial Number</label>
-                    <div className="relative group/field">
+                    <div className="relative group/field group">
                       <div className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-400 transition-colors group-focus-within/field:text-blue-500">
                         <Hash size={18} />
                       </div>
@@ -4874,6 +5051,11 @@ function SalesFormSection({
                         className="w-full pl-14 pr-6 py-4 bg-slate-50 border-2 border-transparent rounded-[20px] outline-none text-base font-bold focus:bg-white focus:border-blue-500 focus:ring-8 focus:ring-blue-50 transition-all disabled:opacity-50" 
                         placeholder="000"
                       />
+                      <div className="absolute right-4 top-1/2 -translate-y-1/2">
+                        <div className="px-3 py-1 bg-blue-100 text-blue-600 rounded-full text-[8px] font-black uppercase tracking-tighter shadow-sm border border-blue-200">
+                          AUTO-SYNC ACTIVE
+                        </div>
+                      </div>
                     </div>
                   </div>
                   <div className="space-y-3">
@@ -5117,14 +5299,6 @@ function SalesFormSection({
               >
                 <div className="flex justify-between items-center mb-1">
                   <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">Additional Observations</label>
-                  <button 
-                    onClick={summarizeNotes}
-                    disabled={isSummarizing || !generalNotes.trim()}
-                    className="flex items-center gap-1.5 px-3 py-1 bg-blue-50 text-blue-600 rounded-full text-[9px] font-black uppercase tracking-widest hover:bg-blue-100 transition-all border border-blue-100 disabled:opacity-30 disabled:cursor-not-allowed group active:scale-95"
-                  >
-                    {isSummarizing ? <Loader2 size={10} className="animate-spin" /> : <Sparkles size={10} className="group-hover:scale-110 transition-transform" />}
-                    {isSummarizing ? "Summarizing..." : "AI Summary"}
-                  </button>
                 </div>
                 <textarea 
                   disabled={!can('add')}
@@ -5147,7 +5321,7 @@ function SalesFormSection({
         </div>
 
         {/* Right Sidebar: Cart & Analytics */}
-        <div className="lg:col-span-4 space-y-8">
+        <div id="billing-summary" className="lg:col-span-4 space-y-8">
           <section className="bg-slate-900 rounded-[32px] shadow-2xl overflow-hidden text-white sticky top-24 border border-slate-800">
             <div className="p-8 border-b border-white/5 bg-gradient-to-br from-slate-800/50 to-transparent">
                <div className="flex items-center justify-between mb-8">
@@ -5296,32 +5470,32 @@ function SalesFormSection({
                 <span className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 flex items-center gap-2"><History size={14} className="text-blue-500" /> Recent Flows</span>
              </div>
              <div className="p-4 space-y-3">
-                {recentRecords.length === 0 ? (
-                  <div className="py-12 text-center opacity-30 italic">
-                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">No session history</p>
-                  </div>
-                ) : (
-                  recentRecords.map((r: any) => (
-                    <div key={r.id} className="p-4 bg-white border border-slate-100 rounded-2xl hover:border-blue-200 hover:shadow-lg hover:shadow-blue-500/5 transition-all group">
-                       <div className="flex justify-between items-start mb-2">
-                          <span className="text-xs font-black text-slate-800 uppercase line-clamp-1 flex-1 pr-2">{r.name}</span>
-                          <span className="text-xs font-black font-mono text-blue-600">₹{r.totalAmount}</span>
-                       </div>
-                       <div className="flex justify-between items-center">
-                          <div className="flex items-center gap-2">
-                             <div className="w-1.5 h-1.5 rounded-full bg-slate-200" />
-                             <span className="text-[9px] font-bold text-slate-400 uppercase tracking-tight">{r.studentClass}</span>
-                          </div>
-                          <div className={`text-[8px] font-black uppercase px-2 py-1 rounded-lg ${
-                            r.paymentMode === 'Pending' ? 'text-amber-600 bg-amber-50' : 
-                            r.paymentMode === 'UPI' ? 'text-indigo-600 bg-indigo-50' : 'text-emerald-600 bg-emerald-50'
-                          }`}>
-                            {r.paymentMode}
-                          </div>
-                       </div>
+                  {recentRecords.length === 0 ? (
+                    <div className="py-12 text-center opacity-30 italic">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">History Clear</p>
                     </div>
-                  ))
-                )}
+                  ) : (
+                    recentRecords.map((r: any) => (
+                      <div key={r.id} className="p-4 bg-white border border-slate-100 rounded-2xl hover:border-blue-200 hover:shadow-lg hover:shadow-blue-500/5 transition-all group cursor-default">
+                         <div className="flex justify-between items-start mb-2">
+                            <span className="text-xs font-black text-slate-800 uppercase line-clamp-1 flex-1 pr-2">{r.name}</span>
+                            <span className="text-xs font-black font-mono text-blue-600">₹{r.totalAmount}</span>
+                         </div>
+                         <div className="flex justify-between items-center">
+                            <div className="flex items-center gap-2">
+                               <div className="w-1.5 h-1.5 rounded-full bg-slate-200" />
+                               <span className="text-[9px] font-bold text-slate-400 uppercase tracking-tight">{r.studentClass} • {r.date}</span>
+                            </div>
+                            <div className={`text-[8px] font-black uppercase px-2 py-1 rounded-lg ${
+                              r.paymentMode === 'Pending' ? 'text-amber-600 bg-amber-50 border border-amber-100' : 
+                              r.paymentMode === 'UPI' ? 'text-indigo-600 bg-indigo-50 border border-indigo-100' : 'text-emerald-600 bg-emerald-50 border border-emerald-100'
+                            }`}>
+                              {r.paymentMode}
+                            </div>
+                         </div>
+                      </div>
+                    ))
+                  )}
              </div>
           </section>
         </div>
@@ -5542,17 +5716,34 @@ function LedgerSection({
   grandTotal, 
   pricing,
   can,
-  importFromSpreadsheet,
-  isAnalyzing,
+  getNextSrNo,
+  setMsg,
   onSort,
   sortConfig,
-  downloadTemplate
+  downloadTemplate,
+  itemOrder
 }: any) {
   const [editingCell, setEditingCell] = useState<{ id: string, field: string } | null>(null);
   const [quickAdd, setQuickAdd] = useState({ name: '', studentClass: CLASSES[0], notes: '' });
+  const [footerQuickEntry, setFooterQuickEntry] = useState({ name: '', studentClass: CLASSES[0], totalAmount: '' });
+  const [showMobileFilters, setShowMobileFilters] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const aiFileInputRef = useRef<HTMLInputElement>(null);
-  const itemNames = Object.keys(pricing);
+  const itemNames = itemOrder && itemOrder.length > 0 ? itemOrder : Object.keys(pricing);
+
+  const [showQuickForm, setShowQuickForm] = useState(false);
+  const [fullQuickAdd, setFullQuickAdd] = useState({
+    date: new Date().toISOString().split('T')[0],
+    name: '',
+    studentClass: CLASSES[0],
+    paymentMode: 'Pending',
+    totalAmount: '',
+    paidAmount: '',
+    discountPercent: '0',
+    paymentDate: new Date().toISOString().split('T')[0],
+    notes: '',
+    selectedItems: [] as any[],
+    customData: {} as Record<string, any>
+  });
 
   const toggleSelectAll = () => {
     if (selectedRecordIds.length === records.length) {
@@ -5571,25 +5762,35 @@ function LedgerSection({
   };
 
   return (
-    <div className="bg-white rounded-2xl shadow-md border border-slate-200 flex flex-col min-h-[70vh] overflow-hidden print:shadow-none print:border-none relative">
+    <div className="bg-white rounded-2xl shadow-md border border-slate-200 flex flex-col min-h-[70vh] overflow-visible print:shadow-none print:border-none relative">
       <div className="px-6 py-5 border-b border-slate-100 bg-white print:hidden">
         <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-6">
           <div className="space-y-1">
             <h2 className="font-bold text-slate-800 text-lg flex items-center gap-2">
               <History className="text-blue-500" size={20} /> Sales Spreadsheet
             </h2>
-            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Managing {records.length} of {allRecords.length} records</p>
+            <p className="text-xs font-black text-slate-400 uppercase tracking-widest">Managing {records.length} of {allRecords.length} records</p>
           </div>
           <div className="flex flex-wrap items-center gap-2 w-full lg:w-auto mt-4 lg:mt-0">
-            <div className="relative group/export flex-1 sm:flex-none">
-              <button className="w-full bg-emerald-50 text-emerald-700 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase hover:bg-emerald-100 transition-all font-mono flex items-center justify-center gap-2 border border-emerald-100">
+            {can('add') && (
+              <button 
+                onClick={() => setShowQuickForm(!showQuickForm)}
+                className={`flex-1 sm:flex-none px-4 py-2.5 rounded-xl text-xs font-black uppercase transition-all flex items-center justify-center gap-2 border ${showQuickForm ? 'bg-slate-900 text-white border-slate-900 shadow-xl' : 'bg-blue-600 text-white border-blue-600 hover:bg-blue-700 shadow-lg'}`}
+              >
+                {showQuickForm ? <X size={14} /> : <PlusCircle size={14} />}
+                {showQuickForm ? 'Close Form' : 'Quick Add Sale'}
+              </button>
+            )}
+
+            <div className="relative group/export flex-1 sm:flex-none z-30">
+              <button className="w-full bg-emerald-50 text-emerald-700 px-4 py-2.5 rounded-xl text-xs font-black uppercase hover:bg-emerald-100 transition-all font-mono flex items-center justify-center gap-2 border border-emerald-100">
                 <FileDown size={14} /> <span className="hidden sm:inline">EXPORT</span><span className="sm:hidden">EX</span>
               </button>
               <div className="absolute right-0 top-full mt-2 w-48 bg-white border border-slate-200 rounded-xl shadow-xl opacity-0 invisible group-hover/export:opacity-100 group-hover/export:visible transition-all z-50">
-                <button onClick={() => exportLedger('xlsx')} className="w-full text-left px-4 py-4 text-[10px] font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-2 border-b border-slate-50">
+                <button onClick={() => exportLedger('xlsx')} className="w-full text-left px-4 py-4 text-xs font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-2 border-b border-slate-50">
                   <FileSpreadsheet size={16} className="text-emerald-500" /> Excel (.xlsx)
                 </button>
-                <button onClick={() => exportLedger('csv')} className="w-full text-left px-4 py-4 text-[10px] font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-2">
+                <button onClick={() => exportLedger('csv')} className="w-full text-left px-4 py-4 text-xs font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-2">
                   <FileSpreadsheet size={16} className="text-blue-500" /> CSV (.csv)
                 </button>
               </div>
@@ -5604,66 +5805,357 @@ function LedgerSection({
             />
             <button 
               onClick={() => fileInputRef.current?.click()}
-              className="flex-1 sm:flex-none bg-indigo-50 text-indigo-700 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase hover:bg-indigo-100 transition-all font-mono flex items-center justify-center gap-2 border border-indigo-100"
+              className="flex-1 sm:flex-none bg-indigo-50 text-indigo-700 px-4 py-2.5 rounded-xl text-xs font-black uppercase hover:bg-indigo-100 transition-all font-mono flex items-center justify-center gap-2 border border-indigo-100"
             >
               <Upload size={14} /> <span className="hidden sm:inline">IMPORT</span><span className="sm:hidden">IM</span>
             </button>
 
             <button 
               onClick={downloadTemplate}
-              className="flex-1 sm:flex-none bg-slate-800 text-white px-4 py-2.5 rounded-xl text-[10px] font-black uppercase hover:bg-slate-700 transition-all font-mono flex items-center justify-center gap-2 shadow-lg"
+              className="flex-1 sm:flex-none bg-slate-800 text-white px-4 py-2.5 rounded-xl text-xs font-black uppercase hover:bg-slate-700 transition-all font-mono flex items-center justify-center gap-2 shadow-lg"
             >
               <FileSpreadsheet size={14} className="text-emerald-400" /> <span className="hidden sm:inline">TEMPLATE</span><span className="sm:hidden">TMP</span>
             </button>
 
-            <input 
-              type="file" 
-              ref={aiFileInputRef} 
-              className="hidden" 
-              accept=".xlsx,.xls,.csv" 
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) importFromSpreadsheet(file);
-                e.target.value = '';
-              }} 
-            />
-            <button 
-              onClick={() => aiFileInputRef.current?.click()}
-              disabled={isAnalyzing}
-              className="flex-1 sm:flex-none bg-blue-600 text-white px-4 py-2.5 rounded-xl text-[10px] font-black uppercase hover:bg-blue-700 transition-all font-mono flex items-center justify-center gap-2 shadow-lg disabled:opacity-50 disabled:cursor-not-allowed group relative"
-            >
-              {isAnalyzing ? <Loader2 size={14} className="animate-spin" /> : <CloudLightning size={14} className="text-blue-200 group-hover:text-white transition-colors" />}
-              <span className="hidden sm:inline">AI IMPORT</span><span className="sm:hidden">AI</span>
-              {isAnalyzing && (
-                <span className="absolute -top-8 left-1/2 -translate-x-1/2 px-2 py-1 bg-slate-800 text-white text-[8px] rounded whitespace-nowrap">
-                  Gemini is analyzing...
-                </span>
-              )}
-            </button>
-
-            <button onClick={handlePrint} disabled={allRecords.length === 0} className="flex-1 sm:flex-none bg-blue-50 text-blue-600 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase hover:bg-blue-100 transition-all font-mono flex items-center justify-center gap-2 border border-blue-100">
+            <button onClick={handlePrint} disabled={allRecords.length === 0} className="flex-1 sm:flex-none bg-blue-50 text-blue-600 px-4 py-2.5 rounded-xl text-xs font-black uppercase hover:bg-blue-100 transition-all font-mono flex items-center justify-center gap-2 border border-blue-100">
               <Printer size={14} /> <span className="hidden sm:inline">PRINT</span><span className="sm:hidden">PDF</span>
             </button>
           </div>
         </div>
+        
+        {/* Full Quick Add Form */}
+        <AnimatePresence>
+          {showQuickForm && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              className="mt-6 overflow-hidden"
+            >
+              <div className="p-6 bg-blue-50/50 rounded-3xl border-2 border-blue-100/50 space-y-6">
+                <div className="flex items-center justify-between border-b border-blue-100 pb-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 bg-blue-600 text-white rounded-xl flex items-center justify-center shadow-lg shadow-blue-600/20">
+                      <Plus size={24} strokeWidth={3} />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-black text-slate-900 uppercase tracking-tight">Express Record Entry</h3>
+                      <p className="text-[10px] font-bold text-blue-600 uppercase tracking-widest">Post a new sale directly to the ledger</p>
+                    </div>
+                  </div>
+                  <button 
+                    onClick={() => {
+                        const finalSrNo = getNextSrNo();
+                        const newRec: any = {
+                          id: crypto.randomUUID(),
+                          srNo: finalSrNo,
+                          name: fullQuickAdd.name,
+                          studentClass: fullQuickAdd.studentClass,
+                          items: fullQuickAdd.selectedItems,
+                          totalAmount: Number(fullQuickAdd.totalAmount) || 0,
+                          discountPercent: Number(fullQuickAdd.discountPercent) || 0,
+                          paidAmount: Number(fullQuickAdd.paidAmount) || 0,
+                          paymentMode: fullQuickAdd.paymentMode,
+                          date: new Date(fullQuickAdd.date).toLocaleDateString('en-IN'),
+                          paymentDate: fullQuickAdd.paymentMode !== 'Pending' ? new Date(fullQuickAdd.paymentDate).toLocaleDateString('en-IN') : null,
+                          timestamp: new Date().toISOString(),
+                          notes: fullQuickAdd.notes,
+                          customData: fullQuickAdd.customData || {}
+                        };
+                        addRecord(newRec);
+                        setFullQuickAdd({
+                          date: new Date().toISOString().split('T')[0],
+                          name: '',
+                          studentClass: CLASSES[0],
+                          paymentMode: 'Pending',
+                          totalAmount: '',
+                          paidAmount: '',
+                          discountPercent: '0',
+                          paymentDate: new Date().toISOString().split('T')[0],
+                          notes: '',
+                          selectedItems: [],
+                          customData: {}
+                        });
+                        setShowQuickForm(false);
+                        setMsg({ type: 'success', text: `Direct Post #${finalSrNo} Successful` });
+                    }}
+                    disabled={!fullQuickAdd.name || !fullQuickAdd.totalAmount}
+                    className="px-6 py-3 bg-blue-600 text-white rounded-2xl text-[10px] font-black uppercase tracking-[0.2em] hover:bg-blue-700 transition-all shadow-xl shadow-blue-500/20 disabled:opacity-30 disabled:grayscale active:scale-95"
+                  >
+                    Post Record #{getNextSrNo()}
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+                  {/* Basic Info */}
+                  <div className="space-y-4">
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Student Name</label>
+                      <div className="relative">
+                        <UserCircle className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                        <input 
+                          type="text"
+                          placeholder="EX: VISHAL D."
+                          className="w-full h-11 pl-10 pr-4 bg-white border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-bold transition-all shadow-sm"
+                          value={fullQuickAdd.name}
+                          onChange={(e) => setFullQuickAdd(p => ({ ...p, name: e.target.value.toUpperCase() }))}
+                        />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Class</label>
+                        <div className="relative">
+                          <Layout className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                          <select 
+                            className="w-full h-11 pl-10 pr-8 bg-white border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-bold appearance-none transition-all shadow-sm"
+                            value={fullQuickAdd.studentClass}
+                            onChange={(e) => setFullQuickAdd(p => ({ ...p, studentClass: e.target.value }))}
+                          >
+                            {CLASSES.map(c => <option key={c} value={c}>{c}</option>)}
+                          </select>
+                          <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-300" size={14} />
+                        </div>
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Sale Date</label>
+                        <div className="relative">
+                          <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                          <input 
+                            type="date"
+                            className="w-full h-11 pl-10 pr-3 bg-white border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-bold transition-all shadow-sm"
+                            value={fullQuickAdd.date}
+                            onChange={(e) => setFullQuickAdd(p => ({ ...p, date: e.target.value }))}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Payment Details */}
+                  <div className="space-y-4">
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Grand Total</label>
+                        <div className="relative">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 font-bold text-xs">₹</span>
+                          <input 
+                            type="number"
+                            placeholder="0.00"
+                            className="w-full h-11 pl-8 pr-4 bg-white border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-black transition-all shadow-sm font-mono"
+                            value={fullQuickAdd.totalAmount}
+                            onChange={(e) => setFullQuickAdd(p => ({ ...p, totalAmount: e.target.value }))}
+                          />
+                          {fullQuickAdd.selectedItems.length > 0 && (
+                            <button 
+                                onClick={() => {
+                                    const calcTotal = fullQuickAdd.selectedItems.reduce((s, i) => s + (i.qty * i.rate), 0);
+                                    setFullQuickAdd(p => ({ ...p, totalAmount: calcTotal.toString() }));
+                                }}
+                                className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 bg-blue-50 text-blue-600 rounded-lg text-[8px] font-black hover:bg-blue-600 hover:text-white transition-all uppercase"
+                            >
+                                Auto
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Discount %</label>
+                        <div className="relative">
+                          <Tag className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                          <input 
+                            type="number"
+                            placeholder="0"
+                            className="w-full h-11 pl-10 pr-4 bg-white border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-black transition-all shadow-sm font-mono"
+                            value={fullQuickAdd.discountPercent}
+                            onChange={(e) => setFullQuickAdd(p => ({ ...p, discountPercent: e.target.value }))}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-1.5">
+                        <div className="flex justify-between items-center px-1">
+                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Paid Amount</label>
+                          {fullQuickAdd.totalAmount && (
+                            <span className="text-[8px] font-black text-red-500 uppercase tracking-tighter">
+                              BAL: ₹{Math.max(0, (Number(fullQuickAdd.totalAmount) * (1 - (Number(fullQuickAdd.discountPercent) || 0) / 100)) - (Number(fullQuickAdd.paidAmount) || 0)).toFixed(0)}
+                            </span>
+                          )}
+                        </div>
+                        <div className="relative">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 font-bold text-xs">₹</span>
+                          <input 
+                            type="number"
+                            placeholder="0.00"
+                            className="w-full h-11 pl-8 pr-4 bg-white border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-black transition-all shadow-sm font-mono"
+                            value={fullQuickAdd.paidAmount}
+                            onChange={(e) => setFullQuickAdd(p => ({ ...p, paidAmount: e.target.value }))}
+                          />
+                        </div>
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Mode</label>
+                        <div className="relative">
+                          <CreditCard className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                          <select 
+                            className="w-full h-11 pl-10 pr-8 bg-white border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-bold appearance-none transition-all shadow-sm"
+                            value={fullQuickAdd.paymentMode}
+                            onChange={(e) => {
+                                const mode = e.target.value;
+                                setFullQuickAdd(p => ({ 
+                                    ...p, 
+                                    paymentMode: mode,
+                                    paidAmount: mode === 'Pending' ? '0' : (p.paidAmount || p.totalAmount)
+                                }));
+                            }}
+                          >
+                            <option value="Pending">Pending</option>
+                            <option value="UPI">UPI</option>
+                            <option value="Cash">Cash</option>
+                          </select>
+                          <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-300" size={14} />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Items Entry */}
+                  <div className="space-y-4 lg:col-span-2">
+                    <div className="flex justify-between items-center px-1">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Cart Items (Optional for fast entry)</label>
+                        <span className="text-[9px] font-bold text-blue-600 bg-blue-100 px-2 py-0.5 rounded-full">{fullQuickAdd.selectedItems.length} Added</span>
+                    </div>
+
+                    {/* Custom Fields Row if exist */}
+                    {customFields && customFields.length > 0 && (
+                        <div className="grid grid-cols-2 gap-4 mb-2">
+                            {customFields.map((f: any) => (
+                                <div key={f.id} className="space-y-1.5">
+                                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">{f.label}</label>
+                                    <input 
+                                        type="text"
+                                        placeholder={`Enter ${f.label}...`}
+                                        className="w-full h-11 px-4 bg-white border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-bold transition-all shadow-sm"
+                                        value={(fullQuickAdd as any).customData?.[f.id] || ''}
+                                        onChange={(e) => {
+                                            const val = e.target.value;
+                                            setFullQuickAdd(p => ({
+                                                ...p,
+                                                customData: { ...(p as any).customData, [f.id]: val }
+                                            }));
+                                        }}
+                                    />
+                                </div>
+                            ))}
+                        </div>
+                    )}
+
+                    <div className="flex gap-2">
+                        <select 
+                            id="quick-item-select"
+                            className="flex-1 h-11 px-4 bg-white border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-bold transition-all shadow-sm"
+                            defaultValue=""
+                            onChange={(e) => {
+                                const itemName = e.target.value;
+                                if (!itemName) return;
+                                // Automatically add the first size for speed
+                                const sizes = Object.keys(pricing[itemName] || {});
+                                if (sizes.length > 0) {
+                                    const firstSize = sizes[0];
+                                    const rate = pricing[itemName][firstSize].price || 0;
+                                    setFullQuickAdd(p => {
+                                        const exists = p.selectedItems.find(i => i.item === itemName && i.size === firstSize);
+                                        if (exists) {
+                                            return {
+                                                ...p,
+                                                selectedItems: p.selectedItems.map(i => (i.item === itemName && i.size === firstSize) ? { ...i, qty: i.qty + 1 } : i)
+                                            };
+                                        }
+                                        return {
+                                            ...p,
+                                            selectedItems: [...p.selectedItems, { item: itemName, size: firstSize, qty: 1, rate }]
+                                        };
+                                    });
+                                }
+                                e.target.value = "";
+                            }}
+                        >
+                            <option value="" disabled>+ Add Item to Record...</option>
+                            {itemNames.map(name => <option key={name} value={name}>{name}</option>)}
+                        </select>
+                        <textarea 
+                            placeholder="Add internal notes..."
+                            className="flex-1 h-11 px-4 py-3 bg-white border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-bold transition-all shadow-sm resize-none"
+                            value={fullQuickAdd.notes}
+                            onChange={(e) => setFullQuickAdd(p => ({ ...p, notes: e.target.value }))}
+                        />
+                    </div>
+                    
+                    {/* Cart Preview */}
+                    <div className="flex flex-wrap gap-2 max-h-[60px] overflow-y-auto custom-scroll">
+                        {fullQuickAdd.selectedItems.map((item, idx) => (
+                            <div key={idx} className="flex items-center gap-2 bg-white border border-blue-100 pl-3 pr-1 py-1 rounded-xl shadow-sm text-[10px] font-black uppercase group">
+                                <span className="text-slate-900">{item.item}</span>
+                                <span className="text-blue-600">[{item.size}]</span>
+                                <span className="px-2 bg-blue-50 text-blue-700 rounded-lg">{item.qty}</span>
+                                <button 
+                                    onClick={() => setFullQuickAdd(p => ({ ...p, selectedItems: p.selectedItems.filter((_, i) => i !== idx) }))}
+                                    className="p-1 hover:bg-red-50 hover:text-red-600 text-slate-300 transition-colors rounded-lg"
+                                >
+                                    <X size={10} />
+                                </button>
+                            </div>
+                        ))}
+                        {fullQuickAdd.selectedItems.length === 0 && (
+                            <div className="w-full text-center py-2 text-[9px] font-bold text-slate-400 uppercase tracking-widest italic border border-dashed border-slate-200 rounded-xl">
+                                No items attached (Total Amount is required)
+                            </div>
+                        )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Filters Row */}
         <div className="mt-6 flex flex-col gap-4 p-4 bg-slate-50/50 rounded-2xl border border-slate-100">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-3">
-            <div className="relative group lg:col-span-3">
-              <label className="text-[9px] font-black uppercase text-slate-400 mb-1 block px-1">Search Records</label>
+          <div className="flex items-center justify-between md:hidden">
+             <div className="relative flex-1">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                <input 
+                  type="text" 
+                  placeholder="Quick Search..." 
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full h-10 pl-9 pr-4 bg-white border border-slate-200 rounded-xl outline-none text-xs font-bold focus:border-blue-500 transition-all shadow-sm"
+                />
+             </div>
+             <button 
+                onClick={() => setShowMobileFilters(!showMobileFilters)}
+                className={`ml-3 p-3 rounded-xl border transition-all ${showMobileFilters ? 'bg-blue-600 border-blue-600 text-white' : 'bg-white border-slate-200 text-slate-500'}`}
+             >
+                <Sliders size={18} />
+             </button>
+          </div>
+
+          <div className={`${showMobileFilters ? 'grid' : 'hidden md:grid'} grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-3`}>
+            <div className="relative group lg:col-span-3 hidden md:block">
+              <label className="text-xs font-black uppercase text-slate-400 mb-1 block px-1">Search Records</label>
               <Search className="absolute left-3 top-7 text-slate-400" size={14} />
               <input 
                 type="text" 
                 placeholder="Student Name..." 
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full h-9 pl-9 pr-4 bg-white border border-slate-200 rounded-xl outline-none text-[10px] font-bold focus:border-blue-500 transition-all shadow-sm"
+                className="w-full h-9 pl-9 pr-4 bg-white border border-slate-200 rounded-xl outline-none text-xs font-bold focus:border-blue-500 transition-all shadow-sm"
               />
             </div>
 
             <div className="space-y-1 lg:col-span-3">
-              <label className="text-[9px] font-black uppercase text-slate-400 mb-1 block px-1">Date Range</label>
+              <label className="text-xs font-black uppercase text-slate-400 mb-1 block px-1">Date Range</label>
               <div className="flex gap-2">
                 <div className="relative flex-1">
                   <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" size={12} />
@@ -5671,7 +6163,7 @@ function LedgerSection({
                     type="date"
                     value={dateStart}
                     onChange={(e) => setDateStart(e.target.value)}
-                    className="w-full h-9 pl-8 pr-2 bg-white border border-slate-200 rounded-xl outline-none text-[10px] font-bold focus:border-blue-500 transition-all shadow-sm text-center sm:text-left"
+                    className="w-full h-9 pl-8 pr-2 bg-white border border-slate-200 rounded-xl outline-none text-xs font-bold focus:border-blue-500 transition-all shadow-sm text-center sm:text-left"
                   />
                 </div>
                 <div className="relative flex-1">
@@ -5680,19 +6172,19 @@ function LedgerSection({
                     type="date"
                     value={dateEnd}
                     onChange={(e) => setDateEnd(e.target.value)}
-                    className="w-full h-9 pl-8 pr-2 bg-white border border-slate-200 rounded-xl outline-none text-[10px] font-bold focus:border-blue-500 transition-all shadow-sm text-center sm:text-left"
+                    className="w-full h-9 pl-8 pr-2 bg-white border border-slate-200 rounded-xl outline-none text-xs font-bold focus:border-blue-500 transition-all shadow-sm text-center sm:text-left"
                   />
                 </div>
               </div>
             </div>
 
             <div className="relative lg:col-span-2">
-              <label className="text-[9px] font-black uppercase text-slate-400 mb-1 block px-1">Payment</label>
+              <label className="text-xs font-black uppercase text-slate-400 mb-1 block px-1">Payment</label>
               <CreditCard className="absolute left-3 top-7 text-slate-400 pointer-events-none" size={14} />
               <select 
                 value={statusFilter}
                 onChange={(e) => setStatusFilter(e.target.value)}
-                className="w-full h-9 pl-9 pr-4 bg-white border border-slate-200 rounded-xl outline-none text-[10px] font-bold appearance-none focus:border-blue-500 transition-all shadow-sm"
+                className="w-full h-9 pl-9 pr-4 bg-white border border-slate-200 rounded-xl outline-none text-xs font-bold appearance-none focus:border-blue-500 transition-all shadow-sm"
               >
                 <option value="All">All Modes</option>
                 <option value="UPI">UPI</option>
@@ -5703,7 +6195,7 @@ function LedgerSection({
             </div>
 
             <div className="relative lg:col-span-2">
-              <label className="text-[9px] font-black uppercase text-slate-400 mb-1 block px-1">Items Sold</label>
+              <label className="text-xs font-black uppercase text-slate-400 mb-1 block px-1">Items Sold</label>
               <Package className="absolute left-3 top-7 text-slate-400 pointer-events-none z-10" size={14} />
               <ItemMultiSelect 
                 options={itemNames} 
@@ -5713,12 +6205,12 @@ function LedgerSection({
             </div>
 
             <div className="relative lg:col-span-2">
-              <label className="text-[9px] font-black uppercase text-slate-400 mb-1 block px-1">Classes</label>
+              <label className="text-xs font-black uppercase text-slate-400 mb-1 block px-1">Classes</label>
               <UserCircle className="absolute left-3 top-7 text-slate-400 pointer-events-none" size={14} />
               <select 
                 value={classFilter}
                 onChange={(e) => setClassFilter(e.target.value)}
-                className="w-full h-9 pl-9 pr-4 bg-white border border-slate-200 rounded-xl outline-none text-[10px] font-bold appearance-none focus:border-blue-500 transition-all shadow-sm"
+                className="w-full h-9 pl-9 pr-4 bg-white border border-slate-200 rounded-xl outline-none text-xs font-bold appearance-none focus:border-blue-500 transition-all shadow-sm"
               >
                 <option value="All">All Classes</option>
                 {CLASSES.map(c => <option key={c} value={c}>{c}</option>)}
@@ -5729,7 +6221,7 @@ function LedgerSection({
 
           <div className="flex flex-wrap gap-2 items-center border-t border-slate-100 pt-3">
              <div className="flex flex-wrap gap-2 flex-1">
-                <span className="text-[8px] font-black uppercase text-slate-400 tracking-tighter self-center mr-2">Quick Dates:</span>
+                <span className="text-[10px] font-black uppercase text-slate-400 tracking-tighter self-center mr-2">Quick Dates:</span>
                 {[
                   { label: 'Today', getValue: () => {
                     const today = new Date().toISOString().split('T')[0];
@@ -5760,7 +6252,7 @@ function LedgerSection({
                       setDateStart(start);
                       setDateEnd(end);
                     }}
-                    className={`px-3 py-1 rounded-full text-[9px] font-bold uppercase transition-all border ${
+                    className={`px-3 py-1.5 rounded-full text-xs font-bold uppercase transition-all border ${
                       dateStart === range.getValue().start && dateEnd === range.getValue().end
                       ? 'bg-blue-600 text-white border-blue-600 shadow-sm shadow-blue-200' 
                       : 'bg-white text-slate-500 border-slate-200 hover:border-blue-400 hover:text-blue-600'
@@ -5780,7 +6272,7 @@ function LedgerSection({
                   setItemFilter([]);
                   setClassFilter('All');
                 }}
-                className="h-7 px-3 bg-slate-200/50 text-slate-600 rounded-lg text-[9px] font-black uppercase hover:bg-slate-200 transition-all flex items-center justify-center gap-2"
+                className="h-9 px-4 bg-slate-200/50 text-slate-600 rounded-xl text-xs font-black uppercase hover:bg-slate-200 transition-all flex items-center justify-center gap-2"
               >
                 <X size={12} /> Reset
               </button>
@@ -5839,8 +6331,112 @@ function LedgerSection({
         </div>
       </div>
 
+      {/* Mobile Floating Action Button */}
+      <div className="fixed bottom-24 right-6 md:hidden z-50">
+        <button 
+          onClick={() => {
+             // Scroll to top or trigger quick add focus
+             const input = document.querySelector('input[placeholder="Quick Add Name..."]') as HTMLInputElement;
+             if (input) {
+               input.scrollIntoView({ behavior: 'smooth', block: 'center' });
+               input.focus();
+             }
+          }}
+          className="w-14 h-14 bg-blue-600 text-white rounded-full shadow-2xl flex items-center justify-center active:scale-90 transition-all"
+        >
+          <Plus size={24} />
+        </button>
+      </div>
+
       <div className="flex-1 overflow-x-auto custom-scroll print:overflow-visible pb-24">
-        <table className="w-full text-left border-separate border-spacing-0 print:border-collapse print:text-[10px]">
+        {/* Mobile Card View */}
+        <div className="md:hidden space-y-4 p-4 pb-20">
+          {records.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-20 bg-slate-50 border-2 border-dashed border-slate-200 rounded-3xl text-center opacity-50">
+              <SearchX size={40} className="mb-4 text-slate-300" />
+              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">No records to display</p>
+            </div>
+          ) : (
+            records.map((record: any) => (
+              <div 
+                key={record.id} 
+                className={`bg-white rounded-2xl border transition-all active:scale-[0.98] ${
+                  selectedRecordIds.includes(record.id) 
+                    ? 'border-blue-500 shadow-lg shadow-blue-100 ring-2 ring-blue-50' 
+                    : record.paymentMode === 'Pending' 
+                      ? 'border-amber-200 bg-amber-50/30' 
+                      : record.paymentMode === 'UPI' 
+                        ? 'border-blue-100 bg-blue-50/20' 
+                        : 'border-emerald-100 bg-emerald-50/20'
+                } p-5`}
+                onClick={() => toggleSelectRecord(record.id)}
+              >
+                <div className="flex justify-between items-start mb-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-xl bg-slate-100 flex items-center justify-center text-[10px] font-black text-slate-500 border border-slate-200">
+                      {record.srNo}
+                    </div>
+                    <div>
+                      <h4 className="text-sm font-black text-slate-900 line-clamp-1">{record.name}</h4>
+                      <p className="text-[9px] font-bold text-slate-400 uppercase">{record.studentClass} • {record.date}</p>
+                    </div>
+                  </div>
+                  <div className={`px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest ${
+                    record.paymentMode === 'Pending' ? 'bg-amber-100 text-amber-600' : 
+                    record.paymentMode === 'UPI' ? 'bg-blue-100 text-blue-600' : 'bg-emerald-100 text-emerald-600'
+                  }`}>
+                    {record.paymentMode}
+                  </div>
+                </div>
+
+                <div className="space-y-3 pt-2 mb-4 border-t border-slate-50">
+                  {Object.entries(record.items || {}).map(([item, sizes]: [string, any]) => (
+                    <div key={item} className="flex flex-col gap-1.5">
+                      <div className="text-[9px] font-black text-blue-600 uppercase tracking-tighter">{item}</div>
+                      <div className="flex flex-wrap gap-2">
+                        {Object.entries(sizes).map(([size, info]: [string, any]) => (
+                          <div key={size} className="flex items-center gap-1.5 bg-slate-50 px-2 py-1 rounded-lg border border-slate-100 group">
+                            <span className="text-[8px] font-black text-slate-400 group-hover:text-blue-500">{size}</span>
+                            <span className="w-px h-2 bg-slate-200" />
+                            <span className="text-[9px] font-black text-slate-900">{info.qty} pcs</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex items-center justify-between pt-4 border-t border-slate-100 mt-2">
+                  <div className="text-right flex-1">
+                    <p className="text-[8px] font-black text-slate-400 uppercase tracking-tighter">Grand Total</p>
+                    <p className="text-sm font-black text-slate-900 font-mono">₹ {record.totalAmount}</p>
+                  </div>
+                  <div className="flex gap-2 shrink-0">
+                    {can('edit') && (
+                      <button 
+                        onClick={(e) => { e.stopPropagation(); setEditingRecord(record); }}
+                        className="p-3 bg-blue-50 text-blue-600 rounded-xl hover:bg-blue-600 hover:text-white transition-all shadow-sm"
+                      >
+                        <Edit2 size={16} />
+                      </button>
+                    )}
+                    {can('delete') && (
+                      <button 
+                        onClick={(e) => { e.stopPropagation(); deleteRecord(record.id); }}
+                        className="p-3 bg-red-50 text-red-600 rounded-xl hover:bg-red-600 hover:text-white transition-all shadow-sm"
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+
+        {/* Desktop Table View */}
+        <table className="hidden md:table w-full text-left border-separate border-spacing-0 print:border-collapse print:text-[10px]">
           <thead className="sticky top-0 z-30 bg-slate-50 border-b border-slate-200 print:static print:bg-white text-[9px] uppercase tracking-widest font-black">
             {/* Top Header Row for Items */}
             <tr className="text-slate-400">
@@ -6034,10 +6630,12 @@ function LedgerSection({
                 key={rec.id} 
                 className={`transition-colors text-xs print:hover:bg-transparent group/row ${
                   selectedRecordIds.includes(rec.id) 
-                    ? 'bg-blue-50/50' 
-                    : index % 2 === 0 
-                      ? 'bg-white hover:bg-slate-50' 
-                      : 'bg-slate-50/40 hover:bg-slate-100/60'
+                    ? 'bg-blue-100/50' 
+                    : rec.paymentMode === 'Pending'
+                      ? 'bg-amber-50/50 hover:bg-amber-100/50'
+                      : rec.paymentMode === 'UPI'
+                        ? 'bg-blue-50/30 hover:bg-blue-100/30'
+                        : 'bg-emerald-50/30 hover:bg-emerald-100/30'
                 }`}
               >
                 <td className="sticky left-0 z-10 bg-inherit px-4 py-4 font-mono font-bold text-slate-400 border-r border-slate-100 print:text-black shadow-[2px_0_5px_rgba(0,0,0,0.02)] transition-colors">#{rec.srNo}</td>
@@ -6307,18 +6905,97 @@ function LedgerSection({
         </table>
       </div>
 
+      {/* Footer Quick Entry Form */}
+      {can('add') && (
+        <div className="mx-6 mb-6 p-4 bg-blue-50/30 rounded-2xl border border-blue-100/50 print:hidden shadow-sm">
+          <div className="flex flex-col lg:flex-row items-center gap-4">
+            <div className="flex items-center gap-3 shrink-0">
+               <div className="w-10 h-10 rounded-xl bg-blue-600 text-white flex items-center justify-center shadow-lg shadow-blue-500/20">
+                  <Plus size={20} strokeWidth={3} />
+               </div>
+               <div>
+                  <h4 className="text-[10px] font-black uppercase tracking-widest text-blue-600">Quick Record</h4>
+                  <p className="text-[8px] font-bold text-slate-400 uppercase tracking-tighter">Enter basic sale data manually</p>
+               </div>
+            </div>
+            
+            <div className="flex-1 grid grid-cols-1 sm:grid-cols-3 gap-3 w-full">
+               <div className="relative">
+                  <UserIcon className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={12} />
+                  <input 
+                    type="text" 
+                    placeholder="Student Name"
+                    value={footerQuickEntry.name}
+                    onChange={(e) => setFooterQuickEntry(p => ({ ...p, name: e.target.value }))}
+                    className="w-full h-11 pl-9 pr-4 bg-white border border-slate-200 rounded-xl outline-none text-xs font-bold focus:border-blue-500 transition-all shadow-sm"
+                  />
+               </div>
+               <div className="relative">
+                  <Users className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={12} />
+                  <select 
+                    value={footerQuickEntry.studentClass}
+                    onChange={(e) => setFooterQuickEntry(p => ({ ...p, studentClass: e.target.value }))}
+                    className="w-full h-11 pl-9 pr-4 bg-white border border-slate-200 rounded-xl outline-none text-xs font-bold appearance-none focus:border-blue-500 transition-all shadow-sm cursor-pointer"
+                  >
+                    {CLASSES.map(cls => <option key={cls} value={cls}>{cls}</option>)}
+                  </select>
+                  <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-300 pointer-events-none" size={12} />
+               </div>
+               <div className="relative">
+                  <div className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-black text-slate-400">₹</div>
+                  <input 
+                    type="number" 
+                    placeholder="Total Amount"
+                    value={footerQuickEntry.totalAmount}
+                    onChange={(e) => setFooterQuickEntry(p => ({ ...p, totalAmount: e.target.value }))}
+                    className="w-full h-11 pl-7 pr-4 bg-white border border-slate-200 rounded-xl outline-none text-xs font-black font-mono focus:border-blue-500 transition-all shadow-sm"
+                  />
+               </div>
+            </div>
+
+            <button 
+              disabled={!footerQuickEntry.name.trim() || !footerQuickEntry.totalAmount}
+              onClick={async () => {
+                const nextSr = allRecords.length > 0 ? Math.max(...allRecords.map((r: any) => r.srNo)) + 1 : 1;
+                const newRec: any = {
+                  id: crypto.randomUUID(),
+                  srNo: nextSr,
+                  date: new Date().toLocaleDateString('en-IN'),
+                  timestamp: new Date().toISOString(),
+                  name: footerQuickEntry.name,
+                  studentClass: footerQuickEntry.studentClass,
+                  items: [],
+                  totalAmount: Number(footerQuickEntry.totalAmount),
+                  discountPercent: 0,
+                  paymentMode: 'Pending',
+                  paidAmount: null,
+                  paymentDate: null,
+                  notes: 'Quick Entry Footer Form',
+                  customData: {}
+                };
+                await addRecord(newRec);
+                setFooterQuickEntry({ name: '', studentClass: CLASSES[0], totalAmount: '' });
+              }}
+              className="h-11 px-8 bg-blue-600 text-white rounded-xl text-xs font-black uppercase tracking-widest hover:bg-blue-700 transition-all shadow-lg shadow-blue-500/20 active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-3 shrink-0"
+            >
+              <CheckCircle2 size={16} /> SUBMIT RECORD
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="p-6 bg-slate-900 text-white flex justify-between items-center rounded-b-2xl print:bg-white print:text-black print:border-t print:border-slate-300">
          <div className="flex gap-8">
             <div className="flex flex-col">
-               <span className="text-[10px] uppercase font-black text-slate-500">Transactions</span>
+               <span className="text-xs uppercase font-black text-slate-500">Transactions</span>
                <span className="text-xl font-black">{records.length}</span>
             </div>
             <div className="flex flex-col">
-               <span className="text-[10px] uppercase font-black text-slate-500">Revenue</span>
+               <span className="text-xs uppercase font-black text-slate-500">Revenue</span>
                <span className="text-xl font-black font-mono tracking-tighter">₹ {grandTotal}</span>
             </div>
          </div>
-         <div className="text-[10px] font-black text-slate-500 uppercase tracking-widest hidden sm:block print:block">Structured CRM Data</div>
+         <div className="text-xs font-black text-slate-500 uppercase tracking-widest hidden sm:block print:block">Structured CRM Data</div>
       </div>
 
       <AnimatePresence>
@@ -6354,8 +7031,8 @@ function ConfirmDialog({ isOpen, title, message, onConfirm, onCancel, type = 'da
             <p className="text-sm text-slate-500 font-medium leading-relaxed">{message}</p>
           </div>
           <div className="flex gap-3">
-            <button disabled={isLoading} onClick={onCancel} className="flex-1 px-6 py-3 bg-slate-100 text-slate-600 rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-200 transition-all disabled:opacity-50">Cancel</button>
-            <button disabled={isLoading} onClick={async () => { await onConfirm(); onCancel(); }} className={`flex-1 px-6 py-3 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest transition-all shadow-lg flex items-center justify-center gap-2 disabled:opacity-50 ${type === 'danger' ? 'bg-red-600 hover:bg-red-700 shadow-red-500/20' : 'bg-blue-600 hover:bg-blue-700 shadow-blue-500/20'}`}>
+            <button disabled={isLoading} onClick={onCancel} className="flex-1 px-6 py-3 bg-slate-100 text-slate-600 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-200 transition-all disabled:opacity-50">Cancel</button>
+            <button disabled={isLoading} onClick={async () => { await onConfirm(); onCancel(); }} className={`flex-1 px-6 py-3 text-white rounded-2xl font-black text-xs uppercase tracking-widest transition-all shadow-lg flex items-center justify-center gap-2 disabled:opacity-50 ${type === 'danger' ? 'bg-red-600 hover:bg-red-700 shadow-red-500/20' : 'bg-blue-600 hover:bg-blue-700 shadow-blue-500/20'}`}>
               {isLoading && <Loader2 size={12} className="animate-spin" />}
               {isLoading ? 'Processing...' : 'Confirm'}
             </button>
@@ -6368,6 +7045,21 @@ function ConfirmDialog({ isOpen, title, message, onConfirm, onCancel, type = 'da
 
 function ImportResultModal({ result, onClose }: { result: any; onClose: () => void }) {
   if (!result) return null;
+
+  const downloadErrorReport = () => {
+    if (!result || result.errors.length === 0) return;
+    
+    const errorData = result.errors.map((e: any) => ({
+      ...e.rawData,
+      "ERROR_REASON": e.reason
+    }));
+    
+    const worksheet = XLSX.utils.json_to_sheet(errorData);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Errors");
+    XLSX.writeFile(workbook, `Import_Errors_${new Date().getTime()}.xlsx`);
+  };
+
   return (
     <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
       <motion.div 
@@ -6394,8 +7086,8 @@ function ImportResultModal({ result, onClose }: { result: any; onClose: () => vo
               <thead>
                  <tr className="border-b border-slate-50">
                     <th className="p-3 text-[10px] font-black uppercase text-slate-400">Row</th>
-                    <th className="p-3 text-[10px] font-black uppercase text-slate-400">Item</th>
-                    <th className="p-3 text-[10px] font-black uppercase text-slate-400">Size</th>
+                    <th className="p-3 text-[10px] font-black uppercase text-slate-400">Identifier</th>
+                    {result.type === 'pricing' && <th className="p-3 text-[10px] font-black uppercase text-slate-400">Sub</th>}
                     <th className="p-3 text-[10px] font-black uppercase text-slate-400 text-red-500">Reason</th>
                  </tr>
               </thead>
@@ -6403,16 +7095,23 @@ function ImportResultModal({ result, onClose }: { result: any; onClose: () => vo
                  {result.errors.map((err: any, idx: number) => (
                     <tr key={idx} className="border-b border-slate-50 hover:bg-slate-50/50 transition-colors">
                        <td className="p-3 text-xs font-bold text-slate-500">#{err.row}</td>
-                       <td className="p-3 text-xs font-bold text-slate-800">{err.item}</td>
-                       <td className="p-3 text-xs font-bold text-slate-800">{err.size}</td>
+                       <td className="p-3 text-xs font-bold text-slate-800">{err.identifier}</td>
+                       {result.type === 'pricing' && <td className="p-3 text-xs font-bold text-slate-800">{err.subIdentifier}</td>}
                        <td className="p-3 text-xs font-bold text-red-500">{err.reason}</td>
                     </tr>
                  ))}
               </tbody>
            </table>
         </div>
-        <div className="p-6 bg-slate-50 flex justify-end">
-           <button onClick={onClose} className="px-8 py-3 bg-white text-slate-900 border border-slate-200 rounded-2xl font-black text-[10px] uppercase tracking-widest hover:border-slate-300 transition-all shadow-sm">Close</button>
+        <div className="p-6 bg-slate-50 flex justify-between items-center">
+           <button 
+             onClick={downloadErrorReport}
+             className="flex items-center gap-2 px-6 py-3 bg-amber-50 text-amber-600 border border-amber-100 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-amber-100 transition-all"
+           >
+              <DownloadCloud size={16} />
+              Download Error Log
+           </button>
+           <button onClick={onClose} className="px-8 py-3 bg-white text-slate-900 border border-slate-200 rounded-2xl font-black text-xs uppercase tracking-widest hover:border-slate-300 transition-all shadow-sm">Close</button>
         </div>
       </motion.div>
     </div>
