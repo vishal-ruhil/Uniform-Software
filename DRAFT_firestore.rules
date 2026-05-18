@@ -37,8 +37,7 @@ service cloud.firestore {
       return isSignedIn() && (request.auth.token.email in [
         'vishal@unicrm.in', 
         'vishaldalamwala@gmail.com', 
-        'ruhilvishal123@gmail.com',
-        'admin@nextgeninternationalschool.com'
+        'ruhilvishal123@gmail.com'
       ]);
     }
 
@@ -108,35 +107,66 @@ service cloud.firestore {
 
     // --- 3. Resource Rules ---
 
-    // Connection Test Path
-    match /test/connection {
-      allow get: if true;
-    }
-
     // Collection: Users
     match /users/{userId} {
-      allow read: if isOwner(userId) || isAdmin();
-      allow create: if isOwner(userId);
-      allow update: if isOwner(userId) || isAdmin();
+      allow get: if isOwner(userId) || isAdmin();
+      allow list: if isAdmin();
+      
+      allow create: if isOwner(userId) && isValidUser(incoming()) && (
+        incoming().role == 'Viewer' || 
+        incoming().role == 'Editor' || 
+        (incoming().role == 'Admin' && isWhitelistedAdmin())
+      );
+      
+      allow update: if (isOwner(userId) || isAdmin()) && (
+        // Immutable fields
+        incoming().id == existing().id &&
+        incoming().email == existing().email &&
+        incoming().createdAt == existing().createdAt &&
+        // Validation
+        isValidUser(incoming()) &&
+        (
+          isAdmin() || 
+          (
+            // Action: Edit Profile
+            incoming().diff(existing()).affectedKeys().hasOnly(['name', 'photoURL', 'emailVerified'])
+          )
+        )
+      );
+      
       allow delete: if isAdmin() && userId != request.auth.uid;
-
-      // User-specific Pricing
-      match /pricing/{docId} {
-        allow read, write: if isOwner(userId);
-      }
-
-      // User-specific Sales
-      match /sales/{saleId} {
-        allow read, write: if isOwner(userId);
-      }
-
-      // User-specific Settings
-      match /settings/{settingId} {
-        allow read, write: if isOwner(userId);
-      }
     }
 
-    // --- Legacy Top-Level Collections (Disabled) ---
-    // All data is now under /users/{userId}/...
+    // Collection: Pricing (Singleton document 'current')
+    match /pricing/{docId} {
+      allow read: if isSignedIn();
+      allow write: if isEditor() && isValidPricing(incoming()) && isValidId(docId);
+    }
+
+    // Collection: Sales
+    match /sales/{saleId} {
+      allow get: if isSignedIn();
+      allow list: if isSignedIn() && (isAdmin() || isEditor() || resource.data.name != null); // Force data evaluate for list
+      
+      allow create: if isEditor() && isValidSale(incoming()) && isEmailVerified();
+      
+      allow update: if isEditor() && isValidSale(incoming()) && isEmailVerified() && (
+        // Action: Record changes
+        incoming().id == existing().id &&
+        incoming().srNo == existing().srNo &&
+        (
+          isAdmin() || 
+          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'studentClass', 'items', 'totalAmount', 'discountPercent', 'paymentMode', 'paidAmount', 'paymentDate', 'notes', 'customData'])
+        )
+      );
+      
+      allow delete: if isAdmin();
+    }
+
+    // Collection: Settings
+    match /settings/{settingId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin() && isValidSettings(incoming()) && isValidId(settingId);
+    }
   }
 }

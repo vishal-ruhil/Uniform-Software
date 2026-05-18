@@ -51,6 +51,7 @@ import {
   Users,
   Upload,
   CloudLightning,
+  Sparkles,
   CheckCircle,
   ExternalLink,
   RefreshCw,
@@ -145,6 +146,7 @@ interface FirestoreErrorInfo {
 }
 
 function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errStack = error instanceof Error ? error.stack : 'No stack trace';
   const errInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
     authInfo: {
@@ -156,7 +158,8 @@ function handleFirestoreError(error: unknown, operationType: OperationType, path
     operationType,
     path
   }
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  console.error('Firestore Error Detailed:', JSON.stringify(errInfo));
+  console.error('Original Error Stack:', errStack);
   throw new Error(JSON.stringify(errInfo));
 }
 
@@ -249,6 +252,88 @@ export default function App() {
   const [dateStart, setDateStart] = useState('');
   const [dateEnd, setDateEnd] = useState('');
   const [msg, setMsg] = useState<{ type: 'success' | 'error', text: string } | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isSummarizing, setIsSummarizing] = useState(false);
+  const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' }>({ 
+    key: 'srNo', 
+    direction: 'desc' 
+  });
+
+  const handleSort = (key: string) => {
+    setSortConfig(prev => ({
+      key,
+      direction: prev.key === key && prev.direction === 'desc' ? 'asc' : 'desc'
+    }));
+  };
+
+  const summarizeNotes = async () => {
+    if (!generalNotes.trim()) return;
+    setIsSummarizing(true);
+    try {
+      const response = await fetch('/api/summarize-notes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ notes: generalNotes }),
+      });
+
+      if (!response.ok) throw new Error('Failed to summarize notes');
+      const { summary } = await response.json();
+      setGeneralNotes(summary);
+      setMsg({ type: 'success', text: 'Notes summarized by Gemini AI' });
+      setTimeout(() => setMsg(null), 3000);
+    } catch (error: any) {
+      console.error('Gemini Summary error:', error);
+      setMsg({ type: 'error', text: 'Summarization Failed: ' + error.message });
+      setTimeout(() => setMsg(null), 4000);
+    } finally {
+      setIsSummarizing(false);
+    }
+  };
+
+  const importFromSpreadsheet = async (file: File) => {
+    setIsAnalyzing(true);
+    try {
+      const data = await file.arrayBuffer();
+      const workbook = XLSX.read(data, { type: 'array' });
+      const firstSheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[firstSheetName];
+      const jsonData = XLSX.utils.sheet_to_json(worksheet);
+      
+      const response = await fetch('/api/analyze-spreadsheet', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          data: JSON.stringify(jsonData),
+          pricingContext: pricing,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to analyze spreadsheet');
+      }
+      
+      const mappedItems = await response.json();
+      
+      const newItems = mappedItems.map((item: any) => ({
+        id: crypto.randomUUID(),
+        ...item,
+        notes: item.notes || 'Imported via Gemini AI'
+      }));
+      
+      setCart((prev: any) => [...prev, ...newItems]);
+      setMsg({ type: 'success', text: `Gemini analyzed and added ${newItems.length} items to your list.` });
+      setTimeout(() => setMsg(null), 4000);
+    } catch (error: any) {
+      console.error('Gemini Import error:', error);
+      setMsg({ type: 'error', text: 'Gemini Analysis Failed: ' + error.message });
+      setTimeout(() => setMsg(null), 4000);
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
 
   const [itemFilter, setItemFilter] = useState<string[]>([]);
   const [classFilter, setClassFilter] = useState('All');
@@ -341,7 +426,7 @@ export default function App() {
     if (!user) return;
 
     // Sync Pricing
-    const unsubPricing = onSnapshot(doc(db, 'pricing', 'current'), (snapshot) => {
+    const unsubPricing = onSnapshot(doc(db, 'users', user.id, 'pricing', 'current'), (snapshot) => {
       if (snapshot.exists()) {
         const pData = snapshot.data();
         setPricing(pData.data);
@@ -350,30 +435,30 @@ export default function App() {
         } else {
           setItemOrder(Object.keys(pData.data));
         }
-      } else if (user && user.role === 'Admin') {
-        // Initialize pricing if missing
-        setDoc(doc(db, 'pricing', 'current'), { 
+      } else {
+        // Initialize pricing if missing for EVERY new user
+        setDoc(doc(db, 'users', user.id, 'pricing', 'current'), { 
           data: DEFAULT_PRICING,
           order: Object.keys(DEFAULT_PRICING)
         }).catch(err => {
            console.error("Failed to init pricing", err);
         });
       }
-    }, (error) => handleFirestoreError(error, OperationType.GET, 'pricing/current'));
+    }, (error) => handleFirestoreError(error, OperationType.GET, `users/${user.id}/pricing/current`));
 
     // Sync Records
-    const qSales = query(collection(db, 'sales'), orderBy('timestamp', 'desc'));
+    const qSales = query(collection(db, 'users', user.id, 'sales'), orderBy('srNo', 'desc'));
     const unsubSales = onSnapshot(qSales, (snapshot) => {
       const docs = snapshot.docs.map(d => ({ ...d.data(), id: d.id } as SaleRecord));
       setRecords(docs);
-    }, (error) => handleFirestoreError(error, OperationType.GET, 'sales'));
+    }, (error) => handleFirestoreError(error, OperationType.GET, `users/${user.id}/sales`));
 
     // Sync Custom Fields
-    const unsubFields = onSnapshot(doc(db, 'settings', 'customFields'), (snapshot) => {
+    const unsubFields = onSnapshot(doc(db, 'users', user.id, 'settings', 'customFields'), (snapshot) => {
       if (snapshot.exists()) {
         setCustomFields(snapshot.data().fields || []);
       }
-    }, (error) => handleFirestoreError(error, OperationType.GET, 'settings/customFields'));
+    }, (error) => handleFirestoreError(error, OperationType.GET, `users/${user.id}/settings/customFields`));
 
     // Sync Users (Admin only)
     let unsubUsers: any = () => {};
@@ -394,13 +479,14 @@ export default function App() {
 
   // Save changes to Firestore
   const updatePricingInCloud = async (newPricing: Pricing, newOrder?: string[]) => {
+    if (!user) return;
     try {
-      await setDoc(doc(db, 'pricing', 'current'), { 
+      await setDoc(doc(db, 'users', user.id, 'pricing', 'current'), { 
         data: newPricing,
         order: newOrder || itemOrder
       });
     } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, 'pricing/current');
+      handleFirestoreError(error, OperationType.WRITE, `users/${user.id}/pricing/current`);
     }
   };
 
@@ -410,10 +496,11 @@ export default function App() {
   };
 
   const updateFieldsInCloud = async (newFields: CustomField[]) => {
+    if (!user) return;
     try {
-      await setDoc(doc(db, 'settings', 'customFields'), { fields: newFields });
+      await setDoc(doc(db, 'users', user.id, 'settings', 'customFields'), { fields: newFields });
     } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, 'settings/customFields');
+      handleFirestoreError(error, OperationType.WRITE, `users/${user.id}/settings/customFields`);
     }
   };
 
@@ -463,7 +550,7 @@ export default function App() {
   }, [records]);
 
   const filteredRecords = useMemo(() => {
-    return records.filter(rec => {
+    const sorted = [...records].filter(rec => {
       const matchesSearch = rec.name.toLowerCase().includes(searchQuery.toLowerCase());
       const matchesStatus = statusFilter === 'All' || rec.paymentMode === statusFilter;
       const matchesDateStart = !dateStart || rec.date >= dateStart;
@@ -472,7 +559,22 @@ export default function App() {
       const matchesClass = classFilter === 'All' || rec.studentClass === classFilter;
       return matchesSearch && matchesStatus && matchesDateStart && matchesDateEnd && matchesItem && matchesClass;
     });
-  }, [records, searchQuery, statusFilter, dateStart, dateEnd, itemFilter, classFilter]);
+
+    return sorted.sort((a: any, b: any) => {
+      let valA = a[sortConfig.key];
+      let valB = b[sortConfig.key];
+
+      // Handle special keys
+      if (sortConfig.key === 'items') {
+        valA = a.items.length;
+        valB = b.items.length;
+      }
+
+      if (valA < valB) return sortConfig.direction === 'asc' ? -1 : 1;
+      if (valA > valB) return sortConfig.direction === 'asc' ? 1 : -1;
+      return 0;
+    });
+  }, [records, searchQuery, statusFilter, dateStart, dateEnd, itemFilter, classFilter, sortConfig]);
 
   const dashboardData = useMemo(() => {
     // Sales by Date
@@ -928,8 +1030,12 @@ export default function App() {
         });
 
         if (successCount > 0) {
+          const newItems = Object.keys(nextPricing).filter(item => !itemOrder.includes(item));
+          const nextOrder = [...itemOrder, ...newItems];
+          
           setPricing(nextPricing);
-          updatePricingInCloud(nextPricing);
+          setItemOrder(nextOrder);
+          updatePricingInCloud(nextPricing, nextOrder);
         }
 
         if (errors.length > 0) {
@@ -1032,7 +1138,7 @@ export default function App() {
 
   useEffect(() => {
     if (!user) return;
-    const unsubSync = onSnapshot(doc(db, 'settings', 'sync'), (snapshot) => {
+    const unsubSync = onSnapshot(doc(db, 'users', user.id, 'settings', 'sync'), (snapshot) => {
       if (snapshot.exists()) {
         setSyncSettings(snapshot.data() as any);
       }
@@ -1082,7 +1188,7 @@ export default function App() {
         await sheetService.appendRecords(token, spreadsheetId, rows);
       }
 
-      await setDoc(doc(db, 'settings', 'sync'), { enabled: true, spreadsheetId });
+      await setDoc(doc(db, 'users', user.id, 'settings', 'sync'), { enabled: true, spreadsheetId });
       setMsg({ type: 'success', text: 'Google Sheet connected and synchronized.' });
     } catch (err: any) {
       console.error('Setup Sheet Error:', err);
@@ -1094,7 +1200,8 @@ export default function App() {
   };
 
   const toggleSync = async (enabled: boolean) => {
-    await updateDoc(doc(db, 'settings', 'sync'), { enabled });
+    if (!user) return;
+    await updateDoc(doc(db, 'users', user.id, 'settings', 'sync'), { enabled });
   };
 
   const manualFullSync = async () => {
@@ -1155,7 +1262,7 @@ export default function App() {
 
     try {
       // Add to Firestore
-      await addDoc(collection(db, 'sales'), newRecord);
+      await addDoc(collection(db, 'users', user.id, 'sales'), newRecord);
       
       // Update Stock in Firestore via transaction or batch
       const batch = writeBatch(db);
@@ -1168,7 +1275,7 @@ export default function App() {
           };
         }
       });
-      batch.set(doc(db, 'pricing', 'current'), { data: nextPricing });
+      batch.set(doc(db, 'users', user.id, 'pricing', 'current'), { data: nextPricing });
       await batch.commit();
 
       // Sync to Sheet
@@ -1187,7 +1294,7 @@ export default function App() {
       setMsg({ type: 'success', text: 'Transaction recorded successfully.' });
       setTimeout(() => setMsg(null), 3000);
     } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, 'sales');
+      handleFirestoreError(error, OperationType.WRITE, `users/${user.id}/sales`);
       setMsg({ type: 'error', text: 'Failed to record transaction. Please try again.' });
     } finally {
       setIsSubmitting(false);
@@ -1201,9 +1308,10 @@ export default function App() {
       title: 'Delete Record',
       message: 'Are you sure you want to permanently delete this transaction record? This action cannot be undone.',
       onConfirm: async () => {
+        if (!user) return;
         try {
           const batch = writeBatch(db);
-          batch.delete(doc(db, 'sales', id));
+          batch.delete(doc(db, 'users', user.id, 'sales', id));
           
           // Revert Stock
           if (rec && rec.items && rec.items.length > 0) {
@@ -1216,7 +1324,7 @@ export default function App() {
                 };
               }
             });
-            batch.set(doc(db, 'pricing', 'current'), { data: nextPricing });
+            batch.set(doc(db, 'users', user.id, 'pricing', 'current'), { data: nextPricing });
           }
           
           await batch.commit();
@@ -1224,7 +1332,7 @@ export default function App() {
           setMsg({ type: 'success', text: 'Record deleted.' });
           setTimeout(() => setMsg(null), 3000);
         } catch (error) {
-          handleFirestoreError(error, OperationType.DELETE, `sales/${id}`);
+          handleFirestoreError(error, OperationType.DELETE, `users/${user.id}/sales/${id}`);
         }
       },
       type: 'danger'
@@ -1232,6 +1340,7 @@ export default function App() {
   };
 
   const updateRecord = async (id: string, updates: any) => {
+    if (!user) return;
     try {
       const oldRec = records.find(r => r.id === id);
       const batch = writeBatch(db);
@@ -1260,10 +1369,10 @@ export default function App() {
           }
         });
         
-        batch.set(doc(db, 'pricing', 'current'), { data: nextPricing });
+        batch.set(doc(db, 'users', user.id, 'pricing', 'current'), { data: nextPricing });
       }
       
-      batch.update(doc(db, 'sales', id), updates);
+      batch.update(doc(db, 'users', user.id, 'sales', id), updates);
       await batch.commit();
 
       if (oldRec) {
@@ -1273,7 +1382,7 @@ export default function App() {
       setMsg({ type: 'success', text: 'Record updated.' });
       setTimeout(() => setMsg(null), 3000);
     } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `sales/${id}`);
+      handleFirestoreError(error, OperationType.UPDATE, `users/${user.id}/sales/${id}`);
     }
   };
 
@@ -1283,14 +1392,16 @@ export default function App() {
       title: 'Bulk Delete',
       message: `Are you sure you want to delete ${ids.length} selected records? This action is permanent.`,
       onConfirm: async () => {
+        if (!user) return;
+        setIsSubmitting(true);
         try {
           const batch = writeBatch(db);
           const nextPricing = { ...pricing };
           let stockChanged = false;
 
-          ids.forEach(id => {
+          const syncPromises = ids.map(async (id) => {
             const rec = records.find(r => r.id === id);
-            batch.delete(doc(db, 'sales', id));
+            batch.delete(doc(db, 'users', user.id, 'sales', id));
             
             if (rec && rec.items && rec.items.length > 0) {
               stockChanged = true;
@@ -1303,19 +1414,21 @@ export default function App() {
                 }
               });
             }
-            performSheetSync('delete', id);
+            return performSheetSync('delete', id);
           });
 
           if (stockChanged) {
-            batch.set(doc(db, 'pricing', 'current'), { data: nextPricing });
+            batch.set(doc(db, 'users', user.id, 'pricing', 'current'), { data: nextPricing });
           }
 
-          await batch.commit();
+          await Promise.all([batch.commit(), ...syncPromises]);
           setSelectedRecordIds([]);
           setMsg({ type: 'success', text: `${ids.length} records deleted.` });
           setTimeout(() => setMsg(null), 3000);
         } catch (error) {
-          handleFirestoreError(error, OperationType.DELETE, 'sales (bulk)');
+          handleFirestoreError(error, OperationType.DELETE, `users/${user.id}/sales (bulk)`);
+        } finally {
+          setIsSubmitting(false);
         }
       },
       type: 'danger'
@@ -1331,9 +1444,11 @@ export default function App() {
         title: 'Bulk Update Status',
         message: `Update ${ids.length} records to ${mode}?`,
         onConfirm: async () => {
+            if (!user) return;
+            setIsSubmitting(true);
             try {
                 const batch = writeBatch(db);
-                ids.forEach(id => {
+                const syncPromises = ids.map(async (id) => {
                     const r = records.find(record => record.id === id);
                     if (r) {
                         const updates: any = {
@@ -1350,16 +1465,18 @@ export default function App() {
                             updates.paidAmount = null;
                             updates.paymentDate = null;
                         }
-                        batch.update(doc(db, 'sales', id), updates);
-                        performSheetSync('update', id, { ...r, ...updates });
+                        batch.update(doc(db, 'users', user.id, 'sales', id), updates);
+                        return performSheetSync('update', id, { ...r, ...updates });
                     }
                 });
-                await batch.commit();
+                await Promise.all([batch.commit(), ...syncPromises]);
                 setSelectedRecordIds([]);
                 setMsg({ type: 'success', text: 'Status updated.' });
                 setTimeout(() => setMsg(null), 3000);
             } catch (error) {
-                handleFirestoreError(error, OperationType.UPDATE, 'sales (bulk status)');
+                handleFirestoreError(error, OperationType.UPDATE, `users/${user.id}/sales (bulk status)`);
+            } finally {
+                setIsSubmitting(false);
             }
         },
         type: 'info'
@@ -1372,16 +1489,17 @@ export default function App() {
       title: 'Clear Ledger',
       message: 'Are you sure you want to permanently delete all sales history? This action cannot be undone.',
       onConfirm: async () => {
+        if (!user) return;
         try {
           const batch = writeBatch(db);
           records.forEach(r => {
-            batch.delete(doc(db, 'sales', r.id));
+            batch.delete(doc(db, 'users', user.id, 'sales', r.id));
             performSheetSync('delete', r.id);
           });
           await batch.commit();
           setSelectedRecordIds([]);
         } catch (error) {
-          handleFirestoreError(error, OperationType.DELETE, 'sales (clear all)');
+          handleFirestoreError(error, OperationType.DELETE, `users/${user.id}/sales (clear all)`);
         }
       },
       type: 'danger'
@@ -1451,10 +1569,11 @@ export default function App() {
 
   const importLedger = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
+    if (!file || !user) return;
 
+    setIsSubmitting(true);
     const reader = new FileReader();
-    reader.onload = (evt) => {
+    reader.onload = async (evt) => {
       try {
         const bstr = evt.target?.result;
         const workbook = XLSX.read(bstr, { type: 'binary' });
@@ -1463,71 +1582,121 @@ export default function App() {
         const data = XLSX.utils.sheet_to_json(worksheet) as any[];
 
         const itemNames = Object.keys(pricing);
-        const importedRecords: SaleRecord[] = data.map((row, index) => {
-          // Extract items
-          const items: CartItem[] = [];
-          itemNames.forEach(itemName => {
-            const sizeKey = `${itemName}_Size`;
-            const qtyKey = `${itemName}_Qty`;
-            const priceKey = `${itemName}_Price`;
-            
-            const size = row[sizeKey];
-            const qty = Number(row[qtyKey] || 0);
-            const price = Number(row[priceKey] || 0);
-            
-            if (qty > 0) {
-              let rate = 0;
-              if (qty > 0) rate = price / qty;
+        const timestamp = new Date().toISOString();
+        
+        let importedCount = 0;
+        const batchSize = 400;
+        
+        for (let i = 0; i < data.length; i += batchSize) {
+          const chunk = data.slice(i, i + batchSize);
+          const batch = writeBatch(db);
+          
+          chunk.forEach((row, index) => {
+            const items: CartItem[] = [];
+            itemNames.forEach(itemName => {
+              const sizeKey = `${itemName}_Size`;
+              const qtyKey = `${itemName}_Qty`;
+              const priceKey = `${itemName}_Price`;
               
-              if (rate === 0 && pricing[itemName] && size && pricing[itemName][size]) {
-                rate = pricing[itemName][size].rate;
+              const size = row[sizeKey];
+              const qty = Number(row[qtyKey] || 0);
+              const price = Number(row[priceKey] || 0);
+              
+              if (qty > 0) {
+                let rate = 0;
+                if (qty > 0) rate = price / qty;
+                if (rate === 0 && pricing[itemName] && size && pricing[itemName][size]) {
+                  rate = pricing[itemName][size].rate;
+                }
+
+                items.push({
+                  id: crypto.randomUUID(),
+                  item: itemName,
+                  size: String(size || ""),
+                  qty,
+                  rate
+                });
               }
+            });
 
-              items.push({
-                id: crypto.randomUUID(),
-                item: itemName,
-                size: String(size || ""),
-                qty,
-                rate
-              });
-            }
+            const customData: Record<string, any> = {};
+            customFields.forEach((f: any) => {
+              if (row[f.label] !== undefined) {
+                customData[f.id] = row[f.label];
+              }
+            });
+
+            const newRecord: SaleRecord = {
+              id: crypto.randomUUID(),
+              srNo: Number(row["Sr. No."]) || (records.length + i + index + 1),
+              date: row["Date"] || new Date().toLocaleDateString('en-IN'),
+              timestamp,
+              name: String(row["Student Name"] || "Unknown"),
+              studentClass: String(row["Class"] || CLASSES[0]),
+              items,
+              totalAmount: Number(row["Total Amount"] || 0),
+              discountPercent: Number(row["Discount %"] || 0),
+              paymentMode: (row["Payment Mode"] as PaymentMode) || 'Pending',
+              paidAmount: row["Paid Amount"] ? Number(row["Paid Amount"]) : null,
+              paymentDate: row["Payment Date"] || null,
+              notes: row["General Notes"] || "",
+              customData
+            };
+            
+            const docRef = doc(collection(db, 'users', user.id, 'sales'));
+            newRecord.id = docRef.id; // use firestore id
+            batch.set(docRef, newRecord);
+            importedCount++;
           });
+          
+          await batch.commit();
+        }
 
-          // Extract custom data
-          const customData: Record<string, any> = {};
-          customFields.forEach((f: any) => {
-            if (row[f.label] !== undefined) {
-              customData[f.id] = row[f.label];
-            }
-          });
-
-          return {
-            id: crypto.randomUUID(),
-            srNo: Number(row["Sr. No."]) || (records.length + index + 1),
-            date: row["Date"] || new Date().toLocaleDateString('en-IN'),
-            timestamp: new Date().toISOString(),
-            name: String(row["Student Name"] || "Unknown"),
-            studentClass: String(row["Class"] || CLASSES[0]),
-            items,
-            totalAmount: Number(row["Total Amount"] || 0),
-            discountPercent: Number(row["Discount %"] || 0),
-            paymentMode: (row["Payment Mode"] as PaymentMode) || 'Pending',
-            paidAmount: row["Paid Amount"] ? Number(row["Paid Amount"]) : null,
-            paymentDate: row["Payment Date"] || null,
-            notes: row["General Notes"] || "",
-            customData
-          };
-        });
-
-        setRecords((prev: SaleRecord[]) => [...prev, ...importedRecords]);
-        setMsg({ type: 'success', text: `${importedRecords.length} records imported successfully` });
+        setMsg({ type: 'success', text: `${importedCount} records imported and synced to database` });
+        setTimeout(() => setMsg(null), 3000);
       } catch (err) {
         console.error("Import error:", err);
         setMsg({ type: 'error', text: 'Failed to import ledger. Please check file format.' });
+      } finally {
+        setIsSubmitting(false);
       }
     };
     reader.readAsBinaryString(file);
     e.target.value = ''; // Reset input
+  };
+
+  const downloadTemplate = () => {
+    const itemNames = Object.keys(pricing);
+    const headers: any = {
+      "Sr. No.": "Ex: 1",
+      "Date": new Date().toLocaleDateString('en-IN'),
+      "Student Name": "Ex: John Doe",
+      "Class": CLASSES[0],
+      "General Notes": "Example entry",
+    };
+
+    itemNames.forEach(itemName => {
+      headers[`${itemName}_Size`] = Object.keys(pricing[itemName])[0] || "M";
+      headers[`${itemName}_Qty`] = 0;
+      headers[`${itemName}_Price`] = 0;
+    });
+
+    headers["Total Amount"] = 0;
+    headers["Discount %"] = 0;
+    headers["Payment Mode"] = "Pending";
+    headers["Paid Amount"] = 0;
+    headers["Payment Date"] = "";
+
+    customFields.forEach((f: any) => {
+      headers[f.label] = "";
+    });
+
+    const worksheet = XLSX.utils.json_to_sheet([headers]);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "ImportTemplate");
+    XLSX.writeFile(workbook, "Ledger_Import_Template.xlsx");
+    
+    setMsg({ type: 'success', text: 'Template downloaded successfully' });
   };
 
   const handlePrint = () => {
@@ -1615,6 +1784,7 @@ export default function App() {
         title={confirmState.title}
         message={confirmState.message}
         type={confirmState.type}
+        isLoading={isSubmitting}
         onConfirm={confirmState.onConfirm}
         onCancel={() => setConfirmState(p => ({ ...p, isOpen: false }))}
       />
@@ -2458,6 +2628,10 @@ export default function App() {
                 updateCustomField={updateCustomField}
                 recentRecords={records.slice(0, 3)}
                 can={can}
+                isAnalyzing={isAnalyzing}
+                importFromSpreadsheet={importFromSpreadsheet}
+                summarizeNotes={summarizeNotes}
+                isSummarizing={isSummarizing}
               />
             </motion.div>
           )}
@@ -2490,6 +2664,8 @@ export default function App() {
                 setClassFilter={setClassFilter}
                 exportLedger={exportLedger}
                 importLedger={importLedger}
+                importFromSpreadsheet={importFromSpreadsheet}
+                isAnalyzing={isAnalyzing}
                 handlePrint={handlePrint}
                 deleteRecord={deleteRecord}
                 setEditingRecord={setEditingRecord}
@@ -2500,6 +2676,9 @@ export default function App() {
                 bulkDeleteRecords={bulkDeleteRecords}
                 bulkUpdateStatus={bulkUpdateStatus}
                 customFields={customFields}
+                onSort={handleSort}
+                sortConfig={sortConfig}
+                downloadTemplate={downloadTemplate}
                 grandTotal={filteredRecords.reduce((sum, r) => sum + r.totalAmount, 0)}
                 pricing={pricing}
                 can={can}
@@ -4043,6 +4222,7 @@ function PriceConfigSection({ pricing, itemOrder, updateItemOrder, handlePriceCh
         <div className="flex flex-wrap items-center gap-2">
           <div className="group relative">
             <button 
+              onClick={exportPricingExcel}
               className="flex items-center gap-2 px-5 py-3 bg-slate-800 text-white rounded-2xl text-[9px] font-black uppercase tracking-widest hover:bg-slate-700 transition-all shadow-lg active:scale-95"
             >
               <DownloadCloud size={14} /> Export
@@ -4057,11 +4237,21 @@ function PriceConfigSection({ pricing, itemOrder, updateItemOrder, handlePriceCh
             </div>
           </div>
 
+          <button 
+            onClick={exportPricingExcel}
+            className="flex items-center gap-2 px-5 py-3 bg-slate-800 text-white border border-slate-700 rounded-2xl text-[9px] font-black uppercase tracking-widest hover:bg-slate-700 transition-all shadow-lg active:scale-95"
+          >
+            <FileSpreadsheet size={14} className="text-emerald-400" /> Template
+          </button>
+
           <div className="group relative">
             <input type="file" accept=".json" ref={jsonFileInputRef} onChange={importPricing} className="hidden" />
             <input type="file" accept=".xlsx,.xls,.csv" ref={excelFileInputRef} onChange={importPricingExcel} className="hidden" />
             
-            <button className="flex items-center gap-2 px-5 py-3 bg-blue-600 text-white rounded-2xl text-[9px] font-black uppercase tracking-widest hover:bg-blue-500 transition-all shadow-lg active:scale-95">
+            <button 
+              onClick={() => excelFileInputRef.current?.click()}
+              className="flex items-center gap-2 px-5 py-3 bg-blue-600 text-white rounded-2xl text-[9px] font-black uppercase tracking-widest hover:bg-blue-500 transition-all shadow-lg active:scale-95"
+            >
               <Upload size={14} /> Import
             </button>
             
@@ -4284,7 +4474,10 @@ function InventoryConfigSection({ pricing, itemOrder, handleStockChange, handleM
         </h2>
         <div className="flex flex-wrap items-center gap-2">
           <div className="group relative">
-            <button className="flex items-center gap-2 px-5 py-3 bg-slate-800 text-white rounded-2xl text-[9px] font-black uppercase tracking-widest hover:bg-slate-700 transition-all shadow-lg active:scale-95">
+            <button 
+              onClick={exportPricingExcel}
+              className="flex items-center gap-2 px-5 py-3 bg-slate-800 text-white rounded-2xl text-[9px] font-black uppercase tracking-widest hover:bg-slate-700 transition-all shadow-lg active:scale-95"
+            >
               <DownloadCloud size={14} /> Export
             </button>
             <div className="absolute right-0 top-full mt-2 w-48 bg-white border border-slate-200 rounded-2xl shadow-2xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 overflow-hidden">
@@ -4297,11 +4490,21 @@ function InventoryConfigSection({ pricing, itemOrder, handleStockChange, handleM
             </div>
           </div>
 
+          <button 
+            onClick={exportPricingExcel}
+            className="flex items-center gap-2 px-5 py-3 bg-slate-800 text-white border border-slate-700 rounded-2xl text-[9px] font-black uppercase tracking-widest hover:bg-slate-700 transition-all shadow-lg active:scale-95"
+          >
+            <FileSpreadsheet size={14} className="text-emerald-400" /> Template
+          </button>
+
           <div className="group relative">
             <input type="file" accept=".json" ref={jsonFileInputRef} onChange={importPricing} className="hidden" />
             <input type="file" accept=".xlsx,.xls,.csv" ref={excelFileInputRef} onChange={importPricingExcel} className="hidden" />
             
-            <button className="flex items-center gap-2 px-5 py-3 bg-orange-600 text-white rounded-2xl text-[9px] font-black uppercase tracking-widest hover:bg-orange-500 transition-all shadow-lg active:scale-95">
+            <button 
+              onClick={() => excelFileInputRef.current?.click()}
+              className="flex items-center gap-2 px-5 py-3 bg-orange-600 text-white rounded-2xl text-[9px] font-black uppercase tracking-widest hover:bg-orange-500 transition-all shadow-lg active:scale-95"
+            >
               <Upload size={14} /> Import
             </button>
             
@@ -4479,10 +4682,19 @@ function SalesFormSection({
   studentName, setStudentName, studentClass, setStudentClass, generalNotes, setGeneralNotes, newItem, setNewItem, pricing, currentRate, customFields, customValues, 
   setCustomValues, discountAmount, setDiscountAmount, finalPayable, addToCart, cart, cartTotal, removeFromCart, onSubmitClick, 
   paymentMode, setPaymentMode, paidAmount, setPaidAmount, paymentDate, setPaymentDate,
-  addCustomField, removeCustomField, updateCustomField, recentRecords, can
+  addCustomField, removeCustomField, updateCustomField, recentRecords, can,
+  isAnalyzing, importFromSpreadsheet, summarizeNotes, isSummarizing
 }: any) {
   const [activeStep, setActiveStep] = useState(1);
   const [showAddedMsg, setShowAddedMsg] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      importFromSpreadsheet(file);
+    }
+  };
 
   const handleAddToCart = (e: any) => {
     addToCart(e);
@@ -4514,9 +4726,30 @@ function SalesFormSection({
           <h2 className="text-3xl font-black tracking-tight text-slate-900">New Sale</h2>
           <p className="text-slate-500 font-medium text-sm mt-1">Create a new student billing record.</p>
         </div>
-        
-        {/* Modern Step Indicator */}
-        <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-2xl border border-slate-200">
+
+        <div className="flex items-center gap-4">
+          <input 
+            type="file" 
+            ref={fileInputRef} 
+            onChange={handleImport} 
+            className="hidden" 
+            accept=".csv,.xlsx,.xls"
+          />
+          <button 
+            onClick={() => fileInputRef.current?.click()}
+            disabled={isAnalyzing}
+            className="flex items-center gap-2 bg-white border border-slate-200 px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest text-slate-600 hover:bg-slate-50 transition-all disabled:opacity-50"
+          >
+            {isAnalyzing ? (
+              <Loader2 className="animate-spin" size={12} />
+            ) : (
+              <Upload size={12} />
+            )}
+            {isAnalyzing ? 'Analyzing...' : 'AI Import'}
+          </button>
+          
+          {/* Modern Step Indicator */}
+          <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-2xl border border-slate-200">
           {steps.map((step) => (
             <div 
               key={step.id}
@@ -4535,6 +4768,7 @@ function SalesFormSection({
               <span className="text-[10px] font-black uppercase tracking-widest hidden sm:block">{step.name}</span>
             </div>
           ))}
+          </div>
         </div>
       </div>
 
@@ -4881,7 +5115,17 @@ function SalesFormSection({
                 onViewportEnter={() => setActiveStep(4)}
                 className="space-y-4"
               >
-                <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">Additional Observations</label>
+                <div className="flex justify-between items-center mb-1">
+                  <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">Additional Observations</label>
+                  <button 
+                    onClick={summarizeNotes}
+                    disabled={isSummarizing || !generalNotes.trim()}
+                    className="flex items-center gap-1.5 px-3 py-1 bg-blue-50 text-blue-600 rounded-full text-[9px] font-black uppercase tracking-widest hover:bg-blue-100 transition-all border border-blue-100 disabled:opacity-30 disabled:cursor-not-allowed group active:scale-95"
+                  >
+                    {isSummarizing ? <Loader2 size={10} className="animate-spin" /> : <Sparkles size={10} className="group-hover:scale-110 transition-transform" />}
+                    {isSummarizing ? "Summarizing..." : "AI Summary"}
+                  </button>
+                </div>
                 <textarea 
                   disabled={!can('add')}
                   value={generalNotes} 
@@ -5249,6 +5493,25 @@ function ItemMultiSelect({ options, selected, onChange }: { options: string[], s
   );
 }
 
+function SortHeader({ label, sortKey, currentSort, onSort, className = "", ...props }: any) {
+  const isActive = currentSort.key === sortKey;
+  return (
+    <th 
+      onClick={() => onSort(sortKey)}
+      className={`cursor-pointer hover:bg-slate-100 transition-colors group ${className}`}
+      {...props}
+    >
+      <div className="flex items-center gap-1.5 justify-center">
+        <span>{label}</span>
+        <div className="flex flex-col -space-y-1">
+          <ChevronUp size={8} className={isActive && currentSort.direction === 'asc' ? 'text-blue-600' : 'text-slate-300'} />
+          <ChevronDown size={8} className={isActive && currentSort.direction === 'desc' ? 'text-blue-600' : 'text-slate-300'} />
+        </div>
+      </div>
+    </th>
+  );
+}
+
 function LedgerSection({ 
   records, 
   allRecords,
@@ -5278,11 +5541,17 @@ function LedgerSection({
   customFields, 
   grandTotal, 
   pricing,
-  can
+  can,
+  importFromSpreadsheet,
+  isAnalyzing,
+  onSort,
+  sortConfig,
+  downloadTemplate
 }: any) {
   const [editingCell, setEditingCell] = useState<{ id: string, field: string } | null>(null);
   const [quickAdd, setQuickAdd] = useState({ name: '', studentClass: CLASSES[0], notes: '' });
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const aiFileInputRef = useRef<HTMLInputElement>(null);
   const itemNames = Object.keys(pricing);
 
   const toggleSelectAll = () => {
@@ -5338,6 +5607,38 @@ function LedgerSection({
               className="flex-1 sm:flex-none bg-indigo-50 text-indigo-700 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase hover:bg-indigo-100 transition-all font-mono flex items-center justify-center gap-2 border border-indigo-100"
             >
               <Upload size={14} /> <span className="hidden sm:inline">IMPORT</span><span className="sm:hidden">IM</span>
+            </button>
+
+            <button 
+              onClick={downloadTemplate}
+              className="flex-1 sm:flex-none bg-slate-800 text-white px-4 py-2.5 rounded-xl text-[10px] font-black uppercase hover:bg-slate-700 transition-all font-mono flex items-center justify-center gap-2 shadow-lg"
+            >
+              <FileSpreadsheet size={14} className="text-emerald-400" /> <span className="hidden sm:inline">TEMPLATE</span><span className="sm:hidden">TMP</span>
+            </button>
+
+            <input 
+              type="file" 
+              ref={aiFileInputRef} 
+              className="hidden" 
+              accept=".xlsx,.xls,.csv" 
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) importFromSpreadsheet(file);
+                e.target.value = '';
+              }} 
+            />
+            <button 
+              onClick={() => aiFileInputRef.current?.click()}
+              disabled={isAnalyzing}
+              className="flex-1 sm:flex-none bg-blue-600 text-white px-4 py-2.5 rounded-xl text-[10px] font-black uppercase hover:bg-blue-700 transition-all font-mono flex items-center justify-center gap-2 shadow-lg disabled:opacity-50 disabled:cursor-not-allowed group relative"
+            >
+              {isAnalyzing ? <Loader2 size={14} className="animate-spin" /> : <CloudLightning size={14} className="text-blue-200 group-hover:text-white transition-colors" />}
+              <span className="hidden sm:inline">AI IMPORT</span><span className="sm:hidden">AI</span>
+              {isAnalyzing && (
+                <span className="absolute -top-8 left-1/2 -translate-x-1/2 px-2 py-1 bg-slate-800 text-white text-[8px] rounded whitespace-nowrap">
+                  Gemini is analyzing...
+                </span>
+              )}
             </button>
 
             <button onClick={handlePrint} disabled={allRecords.length === 0} className="flex-1 sm:flex-none bg-blue-50 text-blue-600 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase hover:bg-blue-100 transition-all font-mono flex items-center justify-center gap-2 border border-blue-100">
@@ -5543,19 +5844,40 @@ function LedgerSection({
           <thead className="sticky top-0 z-30 bg-slate-50 border-b border-slate-200 print:static print:bg-white text-[9px] uppercase tracking-widest font-black">
             {/* Top Header Row for Items */}
             <tr className="text-slate-400">
-              <th rowSpan={2} className="sticky left-0 z-40 bg-slate-50 px-4 py-4 border-b border-r border-slate-100 min-w-[60px] shadow-[2px_0_5px_rgba(0,0,0,0.05)]">Sr.</th>
+              <SortHeader 
+                label="Sr." 
+                sortKey="srNo" 
+                currentSort={sortConfig} 
+                onSort={onSort} 
+                className="sticky left-0 z-40 bg-slate-50 px-4 py-4 border-b border-r border-slate-100 min-w-[60px] shadow-[2px_0_5px_rgba(0,0,0,0.05)]"
+                rowSpan={2}
+              />
               <th rowSpan={2} className="px-4 py-4 border-b border-r border-slate-100 min-w-[50px] print:hidden">
-                {can('delete') && (
+                {(can('delete') || can('edit')) && (
                   <input 
                     type="checkbox" 
-                    checked={records.length > 0 && selectedRecordIds.length === records.length}
+                    checked={records.length > 0 && records.every((r: any) => selectedRecordIds.includes(r.id))}
                     onChange={toggleSelectAll}
-                    className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                    className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer w-4 h-4"
                   />
                 )}
               </th>
-              <th rowSpan={2} className="px-4 py-4 border-b border-r border-slate-100 min-w-[100px]">Date</th>
-              <th rowSpan={2} className="px-6 py-4 border-b border-r-[2px] border-slate-200 min-w-[180px]">Student & Notes</th>
+              <SortHeader 
+                label="Date" 
+                sortKey="date" 
+                currentSort={sortConfig} 
+                onSort={onSort} 
+                className="px-4 py-4 border-b border-r border-slate-100 min-w-[100px]"
+                rowSpan={2}
+              />
+              <SortHeader 
+                label="Student & Notes" 
+                sortKey="name" 
+                currentSort={sortConfig} 
+                onSort={onSort} 
+                className="px-6 py-4 border-b border-r-[2px] border-slate-200 min-w-[180px]"
+                rowSpan={2}
+              />
               
               {itemNames.map(name => (
                 <th key={name} colSpan={3} className="px-6 py-4 border-b border-r border-slate-200 bg-blue-50/50 text-blue-600 text-center">
@@ -5563,11 +5885,46 @@ function LedgerSection({
                 </th>
               ))}
 
-              <th rowSpan={2} className="px-6 py-4 border-b border-r border-slate-100">Total Qty</th>
-              <th rowSpan={2} className="px-6 py-4 border-b border-r border-slate-100 text-right min-w-[100px]">Grand Total</th>
-              <th rowSpan={2} className="px-6 py-4 border-b border-r border-slate-100 text-center min-w-[70px]">Disc. %</th>
-              <th rowSpan={2} className="px-6 py-4 border-b border-r border-slate-100 text-right min-w-[100px]">Paid Amt.</th>
-              <th rowSpan={2} className="px-6 py-4 border-b border-r border-slate-100 text-center min-w-[100px]">Pay. Date</th>
+              <SortHeader 
+                label="Total Qty" 
+                sortKey="items" 
+                currentSort={sortConfig} 
+                onSort={onSort} 
+                className="px-6 py-4 border-b border-r border-slate-100"
+                rowSpan={2}
+              />
+              <SortHeader 
+                label="Grand Total" 
+                sortKey="totalAmount" 
+                currentSort={sortConfig} 
+                onSort={onSort} 
+                className="px-6 py-4 border-b border-r border-slate-100 text-right min-w-[100px]"
+                rowSpan={2}
+              />
+              <SortHeader 
+                label="Disc. %" 
+                sortKey="discountPercent" 
+                currentSort={sortConfig} 
+                onSort={onSort} 
+                className="px-6 py-4 border-b border-r border-slate-100 text-center min-w-[70px]"
+                rowSpan={2}
+              />
+              <SortHeader 
+                label="Paid Amt." 
+                sortKey="paidAmount" 
+                currentSort={sortConfig} 
+                onSort={onSort} 
+                className="px-6 py-4 border-b border-r border-slate-100 text-right min-w-[100px]"
+                rowSpan={2}
+              />
+              <SortHeader 
+                label="Pay. Date" 
+                sortKey="paymentDate" 
+                currentSort={sortConfig} 
+                onSort={onSort} 
+                className="px-6 py-4 border-b border-r border-slate-100 text-center min-w-[100px]"
+                rowSpan={2}
+              />
               
               {/* Custom Fields Headers */}
               {customFields?.map((f: any) => (
@@ -5576,7 +5933,14 @@ function LedgerSection({
                 </th>
               ))}
 
-              <th rowSpan={2} className="px-6 py-4 border-b border-slate-100 min-w-[100px]">Payment</th>
+              <SortHeader 
+                label="Payment" 
+                sortKey="paymentMode" 
+                currentSort={sortConfig} 
+                onSort={onSort} 
+                className="px-6 py-4 border-b border-slate-100 min-w-[100px]"
+                rowSpan={2}
+              />
               <th rowSpan={2} className="px-6 py-4 border-b border-slate-100 print:hidden text-center">Action</th>
             </tr>
             
@@ -5678,7 +6042,7 @@ function LedgerSection({
               >
                 <td className="sticky left-0 z-10 bg-inherit px-4 py-4 font-mono font-bold text-slate-400 border-r border-slate-100 print:text-black shadow-[2px_0_5px_rgba(0,0,0,0.02)] transition-colors">#{rec.srNo}</td>
                 <td className="bg-inherit px-4 py-4 border-r border-slate-50 print:hidden text-center transition-colors">
-                  {can('delete') && (
+                  {(can('delete') || can('edit')) && (
                     <input 
                       type="checkbox" 
                       checked={selectedRecordIds.includes(rec.id)}
@@ -5972,7 +6336,7 @@ function LedgerSection({
   );
 }
 
-function ConfirmDialog({ isOpen, title, message, onConfirm, onCancel, type = 'danger' }: any) {
+function ConfirmDialog({ isOpen, title, message, onConfirm, onCancel, type = 'danger', isLoading = false }: any) {
   if (!isOpen) return null;
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
@@ -5983,15 +6347,18 @@ function ConfirmDialog({ isOpen, title, message, onConfirm, onCancel, type = 'da
       >
         <div className="p-8 space-y-6">
           <div className={`w-16 h-16 rounded-2xl flex items-center justify-center mx-auto ${type === 'danger' ? 'bg-red-50 text-red-500' : 'bg-blue-50 text-blue-500'}`}>
-            {type === 'danger' ? <Trash2 size={32} /> : <Info size={32} />}
+            {isLoading ? <Loader2 size={32} className="animate-spin" /> : (type === 'danger' ? <Trash2 size={32} /> : <Info size={32} />)}
           </div>
           <div className="text-center space-y-2">
             <h3 className="text-xl font-bold text-slate-800">{title}</h3>
             <p className="text-sm text-slate-500 font-medium leading-relaxed">{message}</p>
           </div>
           <div className="flex gap-3">
-            <button onClick={onCancel} className="flex-1 px-6 py-3 bg-slate-100 text-slate-600 rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-200 transition-all">Cancel</button>
-            <button onClick={() => { onConfirm(); onCancel(); }} className={`flex-1 px-6 py-3 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest transition-all shadow-lg ${type === 'danger' ? 'bg-red-600 hover:bg-red-700 shadow-red-500/20' : 'bg-blue-600 hover:bg-blue-700 shadow-blue-500/20'}`}>Confirm</button>
+            <button disabled={isLoading} onClick={onCancel} className="flex-1 px-6 py-3 bg-slate-100 text-slate-600 rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-200 transition-all disabled:opacity-50">Cancel</button>
+            <button disabled={isLoading} onClick={async () => { await onConfirm(); onCancel(); }} className={`flex-1 px-6 py-3 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest transition-all shadow-lg flex items-center justify-center gap-2 disabled:opacity-50 ${type === 'danger' ? 'bg-red-600 hover:bg-red-700 shadow-red-500/20' : 'bg-blue-600 hover:bg-blue-700 shadow-blue-500/20'}`}>
+              {isLoading && <Loader2 size={12} className="animate-spin" />}
+              {isLoading ? 'Processing...' : 'Confirm'}
+            </button>
           </div>
         </div>
       </motion.div>

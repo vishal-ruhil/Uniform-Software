@@ -63,17 +63,17 @@
       "schema": "User",
       "description": "Collection of user profiles."
     },
-    "pricing/current": {
+    "users/{userId}/pricing/current": {
       "schema": "Pricing",
-      "description": "Singleton document containing all item pricing and stock."
+      "description": "Singleton document containing all item pricing and stock for a specific user."
     },
-    "sales": {
+    "users/{userId}/sales": {
       "schema": "SaleRecord",
-      "description": "Collection of transaction records."
+      "description": "Collection of transaction records for a specific user."
     },
-    "settings/customFields": {
+    "users/{userId}/settings/customFields": {
       "schema": "object",
-      "description": "Singleton document for dynamic field configuration."
+      "description": "Singleton document for dynamic field configuration for a specific user."
     }
   }
 }

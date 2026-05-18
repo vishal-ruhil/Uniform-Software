@@ -2,5 +2,5 @@
   "name": "Uniform Sales CRM",
   "description": "Next-gen sales management for uniform inventory with dynamic pricing and export capabilities.",
   "requestFramePermissions": ["identity-credentials-get"],
-  "majorCapabilities": []
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
