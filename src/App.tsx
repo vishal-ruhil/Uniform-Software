@@ -16,6 +16,7 @@ import {
   Package,
   User as UserIcon,
   Hash,
+  Smartphone,
   Plus,
   X,
   Pencil,
@@ -37,6 +38,9 @@ import {
   AlertCircle,
   Tag,
   Database,
+  Download,
+  Square,
+  CheckSquare,
   LogIn,
   LogOut,
   Mail,
@@ -47,6 +51,7 @@ import {
   PanelLeftOpen,
   Layout,
   Bell,
+  UploadCloud,
   DownloadCloud,
   Users,
   Upload,
@@ -61,9 +66,14 @@ import {
   ArrowUp,
   PackageCheck,
   Edit2,
-  GripVertical
+  GripVertical,
+  Archive,
+  ArchiveRestore,
+  Edit3
 } from 'lucide-react';
 import { 
+  AreaChart,
+  Area,
   LineChart, 
   Line, 
   XAxis, 
@@ -193,6 +203,9 @@ export default function App() {
   const [retryCount, setRetryCount] = useState(0);
   
   const [isSignUp, setIsSignUp] = useState(false);
+  const [signUpMethod, setSignUpMethod] = useState<'phone' | 'email' | 'google'>('phone');
+  const [dataLoading, setDataLoading] = useState(true);
+  const [showFloatingSearch, setShowFloatingSearch] = useState(false);
 
   const triggerRetry = () => {
     setRetryCount(prev => prev + 1);
@@ -203,6 +216,12 @@ export default function App() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
+  const [phone, setPhone] = useState('');
+  const [username, setUsername] = useState('');
+  const [signUpStep, setSignUpStep] = useState<'form' | 'otp'>('form');
+  const [verificationOtp, setVerificationOtp] = useState('');
+  const [enteredOtp, setEnteredOtp] = useState('');
+  const [otpAlertCode, setOtpAlertCode] = useState<string | null>(null);
   const [editingRecord, setEditingRecord] = useState<SaleRecord | null>(null);
   const [selectedRecordIds, setSelectedRecordIds] = useState<string[]>([]);
 
@@ -260,8 +279,18 @@ export default function App() {
   const [msg, setMsg] = useState<{ type: 'success' | 'error', text: string } | null>(null);
   const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' }>({ 
     key: 'srNo', 
-    direction: 'desc' 
+    direction: 'asc' 
   });
+
+  // Duplicate Records Detection for Sorting
+  const allRecordsDuplicateMap = useMemo(() => {
+    const counts = new Map<string, number>();
+    records.forEach((r: any) => {
+      const key = `${r.srNo}|${(r.name || "").trim().toLowerCase()}`;
+      counts.set(key, (counts.get(key) || 0) + 1);
+    });
+    return counts;
+  }, [records]);
 
   const handleSort = (key: string) => {
     setSortConfig(prev => ({
@@ -270,6 +299,8 @@ export default function App() {
     }));
   };
 
+  const [showArchived, setShowArchived] = useState(false);
+  const [showBulkEditModal, setShowBulkEditModal] = useState(false);
   const [itemFilter, setItemFilter] = useState<string[]>([]);
   const [classFilter, setClassFilter] = useState('All');
 
@@ -309,7 +340,12 @@ export default function App() {
             userData = userDoc.data() as User;
             userData.emailVerified = fbUser.emailVerified;
             // Force admin role for the designated emails
-            const adminEmails = ['vishal@unicrm.in', 'vishaldalamwala@gmail.com', 'ruhilvishal123@gmail.com'];
+            const adminEmails = [
+              'vishal@unicrm.in', 
+              'vishaldalamwala@gmail.com', 
+              'ruhilvishal123@gmail.com',
+              'admin@nextgeninternationalschool.com'
+            ];
             if (fbUser.email && adminEmails.includes(fbUser.email) && userData.role !== 'Admin') {
                 userData.role = 'Admin';
                 try {
@@ -320,7 +356,12 @@ export default function App() {
             }
           } else {
             // Handle case where user is in Auth but not in Firestore
-            const adminEmails = ['vishal@unicrm.in', 'vishaldalamwala@gmail.com', 'ruhilvishal123@gmail.com'];
+            const adminEmails = [
+              'vishal@unicrm.in', 
+              'vishaldalamwala@gmail.com', 
+              'ruhilvishal123@gmail.com',
+              'admin@nextgeninternationalschool.com'
+            ];
             userData = {
               id: fbUser.uid,
               email: fbUser.email || '',
@@ -382,11 +423,15 @@ export default function App() {
     }, (error) => handleFirestoreError(error, OperationType.GET, `users/${user.id}/pricing/current`));
 
     // Sync Records
-    const qSales = query(collection(db, 'users', user.id, 'sales'), orderBy('srNo', 'desc'));
+    const qSales = query(collection(db, 'users', user.id, 'sales'), orderBy('srNo', 'asc'));
     const unsubSales = onSnapshot(qSales, (snapshot) => {
       const docs = snapshot.docs.map(d => ({ ...d.data(), id: d.id } as SaleRecord));
       setRecords(docs);
-    }, (error) => handleFirestoreError(error, OperationType.GET, `users/${user.id}/sales`));
+      setDataLoading(false);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, `users/${user.id}/sales`);
+      setDataLoading(false);
+    });
 
     // Sync Custom Fields
     const unsubFields = onSnapshot(doc(db, 'users', user.id, 'settings', 'customFields'), (snapshot) => {
@@ -397,7 +442,7 @@ export default function App() {
 
     // Sync Users (Admin only)
     let unsubUsers: any = () => {};
-    if (user.role === 'Admin') {
+    if (can('manage-users')) {
       unsubUsers = onSnapshot(collection(db, 'users'), (snapshot) => {
         const docs = snapshot.docs.map(d => d.data() as User);
         setUsers(docs);
@@ -439,26 +484,17 @@ export default function App() {
     }
   };
 
-  // Handle auto-increment for Sr. No.
-  useEffect(() => {
-    if (records.length > 0) {
-      const maxSr = Math.max(...records.map(r => r.srNo || 0));
-      setSrNo(maxSr + 1);
-    } else {
-      setSrNo(1);
-    }
-  }, [records]);
-
   useEffect(() => {
     localStorage.setItem('uniform_users', JSON.stringify(users));
   }, [users]);
 
   // Permissions helper
-  const can = (action: 'add' | 'edit' | 'delete' | 'manage-users') => {
+  const can = (action: 'add' | 'edit' | 'delete' | 'manage-users' | 'manage-settings') => {
     if (!user) return false;
     if (user.role === 'Admin') return true;
     if (user.role === 'Editor') {
-      return action !== 'manage-users';
+      // Editor can do everything except user management and system settings
+      return action !== 'manage-users' && action !== 'manage-settings';
     }
     return false; // Viewer has no write access
   };
@@ -481,18 +517,24 @@ export default function App() {
   }, [cartTotal, discountAmount]);
 
   const grandTotal = useMemo(() => {
-    return records.reduce((sum, r) => sum + r.totalAmount, 0);
+    return records.filter(r => !r.isArchived).reduce((sum, r) => sum + r.totalAmount, 0);
   }, [records]);
 
   const filteredRecords = useMemo(() => {
     const sorted = [...records].filter(rec => {
-      const matchesSearch = rec.name.toLowerCase().includes(searchQuery.toLowerCase());
+      const q = searchQuery.toLowerCase().trim();
+      const matchesSearch = !q || 
+        rec.name.toLowerCase().includes(q) ||
+        rec.items.some(i => i.item.toLowerCase().includes(q)) ||
+        (rec.id && rec.id.toLowerCase().includes(q)) ||
+        (rec.studentClass && rec.studentClass.toLowerCase().includes(q));
       const matchesStatus = statusFilter === 'All' || rec.paymentMode === statusFilter;
       const matchesDateStart = !dateStart || rec.date >= dateStart;
       const matchesDateEnd = !dateEnd || rec.date <= dateEnd;
       const matchesItem = itemFilter.length === 0 || rec.items.some(i => itemFilter.includes(i.item));
       const matchesClass = classFilter === 'All' || rec.studentClass === classFilter;
-      return matchesSearch && matchesStatus && matchesDateStart && matchesDateEnd && matchesItem && matchesClass;
+      const matchesArchived = showArchived ? !!rec.isArchived : !rec.isArchived;
+      return matchesSearch && matchesStatus && matchesDateStart && matchesDateEnd && matchesItem && matchesClass && matchesArchived;
     });
 
     return sorted.sort((a: any, b: any) => {
@@ -503,6 +545,18 @@ export default function App() {
       if (sortConfig.key === 'items') {
         valA = a.items.length;
         valB = b.items.length;
+      }
+
+      if (sortConfig.key === 'duplicates') {
+        const keyA = `${a.srNo}|${(a.name || "").trim().toLowerCase()}`;
+        const keyB = `${b.srNo}|${(b.name || "").trim().toLowerCase()}`;
+        valA = allRecordsDuplicateMap.get(keyA) || 1;
+        valB = allRecordsDuplicateMap.get(keyB) || 1;
+        
+        if (valA === valB) {
+           // If same duplicate status, sort by name and srNo to group them
+           return keyA.localeCompare(keyB);
+        }
       }
 
       if (valA < valB) return sortConfig.direction === 'asc' ? -1 : 1;
@@ -518,7 +572,7 @@ export default function App() {
     const paymentMap: Record<string, number> = { UPI: 0, Cash: 0, Pending: 0 };
     const itemMap: Record<string, Record<string, number>> = {}; // item -> size -> qty
 
-    records.forEach(r => {
+    records.filter(r => !r.isArchived).forEach(r => {
       // Date stats
       if (!dateMap[r.date]) {
         dateMap[r.date] = { total: 0, UPI: 0, Cash: 0, Pending: 0 };
@@ -591,11 +645,12 @@ export default function App() {
   }, [records, pricing]);
 
   const stats = useMemo(() => {
-    const totalSales = records.length;
-    const pendingAmount = records
+    const activeRecords = records.filter(r => !r.isArchived);
+    const totalSales = activeRecords.length;
+    const pendingAmount = activeRecords
       .filter(r => r.paymentMode === 'Pending')
       .reduce((sum, r) => sum + r.totalAmount, 0);
-    const paidAmount = records
+    const paidAmount = activeRecords
       .filter(r => r.paymentMode !== 'Pending')
       .reduce((sum, r) => sum + (r.paidAmount || 0), 0);
     
@@ -608,40 +663,242 @@ export default function App() {
     return Math.max(...records.map(r => Number(r.srNo) || 0)) + 1;
   };
 
+  const triggerOtpVerification = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginError(null);
+    setLoginLoading(true);
+
+    try {
+      const trimmedPhone = phone.trim();
+      const trimmedUsername = username.trim().toLowerCase();
+
+      if (!name.trim()) {
+        throw new Error("Full name cannot be empty.");
+      }
+      if (!/^\d{10}$/.test(trimmedPhone)) {
+        throw new Error("Please enter a valid 10-digit mobile number.");
+      }
+      if (!/^[a-zA-Z0-9_]{3,15}$/.test(trimmedUsername)) {
+        throw new Error("Username must be 3-15 characters long and contain only letters, numbers, or underscores.");
+      }
+      if (password.length < 6) {
+        throw new Error("Password must be at least 6 characters long.");
+      }
+
+      // Check if username or phone is already taken
+      const usersRef = collection(db, 'users');
+      const allUsersSnapshot = await getDocs(usersRef);
+      
+      const usernameExists = allUsersSnapshot.docs.some(
+        d => d.data().username?.toLowerCase() === trimmedUsername
+      );
+      if (usernameExists) {
+        throw new Error("This username is already taken. Please try another one.");
+      }
+
+      const phoneExists = allUsersSnapshot.docs.some(
+        d => d.data().phone === trimmedPhone
+      );
+      if (phoneExists) {
+        throw new Error("This mobile number is already registered.");
+      }
+
+      // Generate a random 6-digit OTP
+      const generatedOtp = Math.floor(100000 + Math.random() * 900000).toString();
+      setVerificationOtp(generatedOtp);
+      setEnteredOtp('');
+      setSignUpStep('otp');
+      
+      setOtpAlertCode(generatedOtp);
+      setMsg({ 
+        type: 'success', 
+        text: `🔐 OTP sent to ${trimmedPhone}: Your registration code is ${generatedOtp}. Enter it below.`
+      });
+    } catch (err: any) {
+      console.error("Signup validation error", err);
+      setLoginError(err.message || "An error occurred during signup validation.");
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const resendOtpCode = () => {
+    setLoginError(null);
+    const generatedOtp = Math.floor(100000 + Math.random() * 900000).toString();
+    setVerificationOtp(generatedOtp);
+    setOtpAlertCode(generatedOtp);
+    setMsg({ 
+      type: 'success', 
+      text: `🔐 SMS resent to ${phone.trim()}: Your registration code is ${generatedOtp}.`
+    });
+  };
+
+  const verifyAndCreateAccount = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginLoading(true);
+    setLoginError(null);
+
+    try {
+      if (enteredOtp !== verificationOtp) {
+        throw new Error("Invalid OTP code. Please check and try again.");
+      }
+
+      const { createUserWithEmailAndPassword, updateProfile } = await import('firebase/auth');
+      const virtualEmail = `${username.trim().toLowerCase()}@uniformsales.crm`;
+      const cred = await createUserWithEmailAndPassword(auth, virtualEmail, password);
+      
+      await updateProfile(cred.user, { displayName: name.trim() });
+
+      // Create user record in Firestore
+      await setDoc(doc(db, 'users', cred.user.uid), {
+        id: cred.user.uid,
+        email: virtualEmail,
+        name: name.trim(),
+        username: username.trim(),
+        phone: phone.trim(),
+        role: 'Viewer',
+        createdAt: new Date().toISOString()
+      });
+
+      setOtpAlertCode(null);
+      setSignUpStep('form');
+      setIsSignUp(false);
+      setPhone('');
+      setUsername('');
+      setPassword('');
+      setName('');
+      
+      setMsg({ type: 'success', text: 'Phone verified! Account created successfully.' });
+      setTimeout(() => setMsg(null), 5000);
+    } catch (err: any) {
+      console.error("Account creation failed", err);
+      if (err.code === 'auth/email-already-in-use') {
+        setLoginError("This username matches an existing account. Please pick a different username.");
+      } else {
+        setLoginError(err.message || "An unexpected error occurred during verification.");
+      }
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const createAccountByEmail = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginLoading(true);
+    setLoginError(null);
+
+    try {
+      const trimmedEmail = email.trim().toLowerCase();
+      const trimmedUsername = username.trim().toLowerCase();
+      const trimmedName = name.trim();
+
+      if (!trimmedName) {
+        throw new Error("Full name cannot be empty.");
+      }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
+        throw new Error("Please enter a valid email address.");
+      }
+      if (!/^[a-zA-Z0-9_]{3,15}$/.test(trimmedUsername)) {
+        throw new Error("Username must be 3-15 characters long and contain only letters, numbers, or underscores.");
+      }
+      if (password.length < 6) {
+        throw new Error("Password must be at least 6 characters long.");
+      }
+
+      // Check if username is already taken
+      const usersRef = collection(db, 'users');
+      const allUsersSnapshot = await getDocs(usersRef);
+      
+      const usernameExists = allUsersSnapshot.docs.some(
+        d => d.data().username?.toLowerCase() === trimmedUsername
+      );
+      if (usernameExists) {
+        throw new Error("This username is already taken. Please try another one.");
+      }
+
+      const emailExists = allUsersSnapshot.docs.some(
+        d => d.data().email?.toLowerCase() === trimmedEmail
+      );
+      if (emailExists) {
+        throw new Error("This email is already registered.");
+      }
+
+      const { createUserWithEmailAndPassword, updateProfile } = await import('firebase/auth');
+      const cred = await createUserWithEmailAndPassword(auth, trimmedEmail, password);
+      
+      await updateProfile(cred.user, { displayName: trimmedName });
+
+      // Create user record in Firestore
+      await setDoc(doc(db, 'users', cred.user.uid), {
+        id: cred.user.uid,
+        email: trimmedEmail,
+        name: trimmedName,
+        username: username.trim(),
+        role: 'Viewer',
+        createdAt: new Date().toISOString()
+      });
+
+      setIsSignUp(false);
+      setEmail('');
+      setUsername('');
+      setPassword('');
+      setName('');
+      
+      setMsg({ type: 'success', text: 'Account created successfully with email!' });
+      setTimeout(() => setMsg(null), 5000);
+    } catch (err: any) {
+      console.error("Email signup failure", err);
+      if (err.code === 'auth/email-already-in-use') {
+        setLoginError("This email is already in use by another account.");
+      } else {
+        setLoginError(err.message || "An unexpected error occurred during signup.");
+      }
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
   const handleEmailAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginLoading(true);
     setLoginError(null);
     
     try {
-      if (isSignUp) {
-        const { createUserWithEmailAndPassword, updateProfile } = await import('firebase/auth');
-        const cred = await createUserWithEmailAndPassword(auth, email, password);
-        await updateProfile(cred.user, { displayName: name || email.split('@')[0] });
-        
-        // Send verification email
-        await sendEmailVerification(cred.user);
-        
-        // Create user record in Firestore
-        await setDoc(doc(db, 'users', cred.user.uid), {
-          id: cred.user.uid,
-          email: cred.user.email,
-          name: name || email.split('@')[0],
-          role: 'Viewer',
-          createdAt: new Date().toISOString()
-        });
-
-        setMsg({ type: 'success', text: 'Account created! A verification email has been sent to your inbox.' });
-        setTimeout(() => setMsg(null), 5000);
-      } else {
-        await signInWithEmailAndPassword(auth, email, password);
+      let loginEmail = email.trim();
+      const trimmedIdentifier = email.trim();
+      
+      const isEmail = trimmedIdentifier.includes('@');
+      
+      if (!isEmail) {
+        const usersRef = collection(db, 'users');
+        try {
+           const allUsersSnapshot = await getDocs(usersRef);
+           const matchedUser = allUsersSnapshot.docs.find(d => {
+             const val = d.data();
+             return (val.username?.toLowerCase() === trimmedIdentifier.toLowerCase()) || 
+                    (val.phone === trimmedIdentifier);
+           });
+           
+           if (matchedUser) {
+             loginEmail = matchedUser.data().email;
+           } else {
+             if (/^\d+$/.test(trimmedIdentifier)) {
+               throw new Error("No user found with this registered phone number.");
+             } else {
+               throw new Error("No user found with this registered username.");
+             }
+           }
+        } catch (err: any) {
+           console.error("Error finding user during login", err);
+           throw new Error(err.message || "Failed to locate registered user credentials.");
+        }
       }
+      
+      await signInWithEmailAndPassword(auth, loginEmail, password);
     } catch (error: any) {
       console.error("Auth error", error);
       if (error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password' || error.code === 'auth/invalid-credential') {
-        setLoginError("Invalid email or password. Please check your credentials.");
-      } else if (error.code === 'auth/email-already-in-use') {
-        setLoginError("This email is already registered. Please sign in instead.");
+        setLoginError("Invalid credentials. Please check your username/phone/email and password.");
       } else if (error.code === 'auth/popup-closed-by-user') {
         setLoginError("Login cancelled.");
       } else {
@@ -750,47 +1007,6 @@ export default function App() {
         ...pricing[item],
         [size]: { ...pricing[item][size], minStock: value }
       }
-    };
-    setPricing(next);
-    updatePricingInCloud(next);
-  };
-
-  const handleMove = (item: string, direction: 'left' | 'right') => {
-    const index = itemOrder.indexOf(item);
-    if (index === -1) return;
-    
-    const newOrder = [...itemOrder];
-    if (direction === 'left' && index > 0) {
-      [newOrder[index], newOrder[index - 1]] = [newOrder[index - 1], newOrder[index]];
-    } else if (direction === 'right' && index < itemOrder.length - 1) {
-      [newOrder[index], newOrder[index + 1]] = [newOrder[index + 1], newOrder[index]];
-    }
-    updateItemOrder(newOrder);
-  };
-
-  const handleMoveSize = (itemName: string, sizeName: string, direction: 'up' | 'down') => {
-    const itemSizes = pricing[itemName];
-    if (!itemSizes) return;
-    
-    const sizes = Object.keys(itemSizes);
-    const idx = sizes.indexOf(sizeName);
-    if (idx === -1) return;
-    
-    const newSizesList = [...sizes];
-    if (direction === 'up' && idx > 0) {
-      [newSizesList[idx], newSizesList[idx - 1]] = [newSizesList[idx - 1], newSizesList[idx]];
-    } else if (direction === 'down' && idx < newSizesList.length - 1) {
-      [newSizesList[idx], newSizesList[idx + 1]] = [newSizesList[idx + 1], newSizesList[idx]];
-    }
-    
-    const updatedSizes: any = {};
-    newSizesList.forEach(s => {
-      updatedSizes[s] = itemSizes[s];
-    });
-    
-    const next = {
-      ...pricing,
-      [itemName]: updatedSizes
     };
     setPricing(next);
     updatePricingInCloud(next);
@@ -1285,19 +1501,22 @@ export default function App() {
       const nextPricing = { ...pricing };
       cart.forEach(item => {
         if (nextPricing[item.item] && nextPricing[item.item][item.size]) {
+          const currentStock = nextPricing[item.item][item.size].stock || 0;
           nextPricing[item.item][item.size] = {
             ...nextPricing[item.item][item.size],
-            stock: nextPricing[item.item][item.size].stock - item.qty
+            stock: Math.max(0, currentStock - item.qty)
           };
         }
       });
-      batch.set(doc(db, 'users', user.id, 'pricing', 'current'), { data: nextPricing });
+      batch.set(doc(db, 'users', user.id, 'pricing', 'current'), { 
+        data: nextPricing,
+        order: itemOrder 
+      });
       await batch.commit();
 
       // Sync to Sheet
       performSheetSync('create', newRecord.id, newRecord);
 
-      setSrNo(prev => prev + 1);
       setCart([]);
       setStudentName('');
       setStudentClass(CLASSES[0]);
@@ -1499,6 +1718,132 @@ export default function App() {
     });
   };
 
+  const bulkApplyDiscount = (ids: string[], discount: number) => {
+    const timestamp = new Date().toISOString();
+    
+    setConfirmState({
+        isOpen: true,
+        title: 'Bulk Apply Discount',
+        message: `Apply ${discount}% discount to ${ids.length} selected records? This will update their total amounts.`,
+        onConfirm: async () => {
+            if (!user) return;
+            setIsSubmitting(true);
+            try {
+                const batch = writeBatch(db);
+                const syncPromises = ids.map(async (id) => {
+                    const r = records.find(record => record.id === id);
+                    if (r) {
+                        const subTotal = r.items.reduce((sum, item) => sum + (item.qty * item.rate), 0);
+                        const discountAmt = (subTotal * discount) / 100;
+                        const newTotal = subTotal - discountAmt;
+
+                        const updates: any = {
+                            discountPercent: discount,
+                            totalAmount: newTotal,
+                            updatedAt: timestamp
+                        };
+
+                        // If it's already paid, we might need to adjust paidAmount if it was previously equal to totalAmount
+                        if (r.paymentMode !== 'Pending' && r.paidAmount === r.totalAmount) {
+                            updates.paidAmount = newTotal;
+                        }
+
+                        batch.update(doc(db, 'users', user.id, 'sales', id), updates);
+                        return performSheetSync('update', id, { ...r, ...updates });
+                    }
+                });
+                await Promise.all([batch.commit(), ...syncPromises]);
+                setSelectedRecordIds([]);
+                setMsg({ type: 'success', text: `Applied ${discount}% discount to selected records.` });
+                setTimeout(() => setMsg(null), 3000);
+            } catch (error) {
+                handleFirestoreError(error, OperationType.UPDATE, `users/${user.id}/sales (bulk discount)`);
+            } finally {
+                setIsSubmitting(false);
+            }
+        },
+        type: 'warning'
+    });
+  };
+
+  const bulkArchiveRecords = (ids: string[], archive: boolean = true) => {
+    const timestamp = new Date().toISOString();
+    setConfirmState({
+      isOpen: true,
+      title: archive ? 'Archive Records' : 'Restore Records',
+      message: `Are you sure you want to ${archive ? 'archive' : 'restore'} ${ids.length} selected records?`,
+      onConfirm: async () => {
+        if (!user) return;
+        setIsSubmitting(true);
+        try {
+          const batch = writeBatch(db);
+          const syncPromises = ids.map(async (id) => {
+             const r = records.find(record => record.id === id);
+             if (!r) return;
+             const updates = { isArchived: archive, updatedAt: timestamp };
+             batch.update(doc(db, 'users', user.id, 'sales', id), updates);
+             return performSheetSync('update', id, { ...r, ...updates });
+          });
+          await Promise.all([batch.commit(), ...syncPromises]);
+          setSelectedRecordIds([]);
+          setMsg({ type: 'success', text: `Successfully ${archive ? 'archived' : 'restored'} ${ids.length} records.` });
+          setTimeout(() => setMsg(null), 3000);
+        } catch (error) {
+           handleFirestoreError(error, OperationType.UPDATE, `users/${user.id}/sales (bulk archive)`);
+        } finally {
+          setIsSubmitting(false);
+        }
+      },
+      type: archive ? 'warning' : 'info'
+    });
+  };
+
+  const bulkUpdateRecords = (ids: string[], updates: any) => {
+    const timestamp = new Date().toISOString();
+    setConfirmState({
+      isOpen: true,
+      title: 'Bulk Update Records',
+      message: `Apply these changes to ${ids.length} selected records?`,
+      onConfirm: async () => {
+        if (!user) return;
+        setIsSubmitting(true);
+        try {
+          const batch = writeBatch(db);
+          const syncPromises = ids.map(async (id) => {
+            const r = records.find(record => record.id === id);
+            if (!r) return;
+            
+            const mergedUpdates: any = { ...updates, updatedAt: timestamp };
+            
+            // Recalculate totals if discount is updating
+            if (updates.discountPercent !== undefined) {
+               const subTotal = r.items.reduce((sum, item) => sum + (item.qty * item.rate), 0);
+               const discountAmt = (subTotal * Number(updates.discountPercent)) / 100;
+               mergedUpdates.totalAmount = subTotal - discountAmt;
+               
+               if (r.paymentMode !== 'Pending' && (r.paidAmount === r.totalAmount || updates.paidAmount === undefined)) {
+                  // Only auto-adjust paid amount if it matches total perfectly, otherwise user manual update wins
+                  // Actually, let's keep it simple: if discount changes, we might want to reset balance.
+               }
+            }
+
+            batch.update(doc(db, 'users', user.id, 'sales', id), mergedUpdates);
+            return performSheetSync('update', id, { ...r, ...mergedUpdates });
+          });
+          await Promise.all([batch.commit(), ...syncPromises]);
+          setSelectedRecordIds([]);
+          setMsg({ type: 'success', text: `Updated ${ids.length} records.` });
+          setTimeout(() => setMsg(null), 3000);
+        } catch (error) {
+           handleFirestoreError(error, OperationType.UPDATE, `users/${user.id}/sales (bulk update)`);
+        } finally {
+          setIsSubmitting(false);
+        }
+      },
+      type: 'warning'
+    });
+  };
+
   const clearRecords = () => {
     setConfirmState({
       isOpen: true,
@@ -1522,13 +1867,13 @@ export default function App() {
     });
   };
 
-  const exportLedger = (format: 'xlsx' | 'csv') => {
+  const exportLedger = (format: 'xlsx' | 'csv', selectedFields?: Record<string, boolean>) => {
     if (filteredRecords.length === 0) {
       setMsg({ type: 'error', text: 'No records to export' });
       return;
     }
 
-    const itemNames = itemOrder && itemOrder.length > 0 ? itemOrder : Object.keys(pricing);
+    const itemNames = Object.keys(pricing);
     
     // Create data rows
     const dataRows = filteredRecords.map(r => {
@@ -1536,33 +1881,38 @@ export default function App() {
       const paidNum = r.paidAmount || 0;
       const balance = r.totalAmount - paidNum;
 
-      const row: any = {
-        "Sr. No.": r.srNo,
-        "Date": r.date,
-        "Student Name": r.name,
-        "Class": r.studentClass,
-        "General Notes": r.notes || "",
-      };
+      const row: any = {};
+      const shouldInclude = (fieldId: string) => !selectedFields || selectedFields[fieldId] === true;
+
+      if (shouldInclude('srNo')) row["Sr. No."] = r.srNo;
+      if (shouldInclude('date')) row["Date"] = r.date;
+      if (shouldInclude('name')) row["Student Name"] = r.name;
+      if (shouldInclude('studentClass')) row["Class"] = r.studentClass;
+      if (shouldInclude('notes')) row["General Notes"] = r.notes || "";
 
       // Add item detailed breakdown
-      itemNames.forEach(itemName => {
-        const lineItem = r.items.find((i: any) => i.item === itemName);
-        row[`${itemName}_Size`] = lineItem ? lineItem.size : "";
-        row[`${itemName}_Qty`] = lineItem ? lineItem.qty : 0;
-        row[`${itemName}_Price`] = lineItem ? lineItem.qty * lineItem.rate : 0;
-      });
+      if (shouldInclude('items')) {
+        itemNames.forEach(itemName => {
+          const lineItem = r.items.find((i: any) => i.item === itemName);
+          row[`${itemName}_Size`] = lineItem ? lineItem.size : "";
+          row[`${itemName}_Qty`] = lineItem ? lineItem.qty : 0;
+          row[`${itemName}_Price`] = lineItem ? lineItem.qty * lineItem.rate : 0;
+        });
+      }
 
-      row["Total Qty"] = totalQty;
-      row["Total Amount"] = r.totalAmount;
-      row["Discount %"] = r.discountPercent || 0;
-      row["Payment Mode"] = r.paymentMode;
-      row["Paid Amount"] = paidNum;
-      row["Balance Due"] = balance;
-      row["Payment Date"] = r.paymentDate || "";
+      if (shouldInclude('totalQty')) row["Total Qty"] = totalQty;
+      if (shouldInclude('totalAmount')) row["Total Amount"] = r.totalAmount;
+      if (shouldInclude('discountPercent')) row["Discount %"] = r.discountPercent || 0;
+      if (shouldInclude('paymentMode')) row["Payment Mode"] = r.paymentMode;
+      if (shouldInclude('paidAmount')) row["Paid Amount"] = paidNum;
+      if (shouldInclude('balanceDue')) row["Balance Due"] = balance;
+      if (shouldInclude('paymentDate')) row["Payment Date"] = r.paymentDate || "";
 
       // Add custom fields
       customFields.forEach((f: any) => {
-        row[f.label] = r.customData?.[f.id] || "";
+        if (shouldInclude(f.id)) {
+          row[f.label] = r.customData?.[f.id] || "";
+        }
       });
 
       return row;
@@ -1583,8 +1933,13 @@ export default function App() {
     setMsg({ type: 'success', text: `Ledger exported as ${format.toUpperCase()}` });
   };
 
-  const importLedger = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+  const importLedger = (fileOrEvent: any) => {
+    let file: File | undefined;
+    if (fileOrEvent instanceof File) {
+      file = fileOrEvent;
+    } else if (fileOrEvent && fileOrEvent.target && fileOrEvent.target.files) {
+      file = fileOrEvent.target.files[0];
+    }
     if (!file || !user) return;
 
     setIsSubmitting(true);
@@ -1703,7 +2058,9 @@ export default function App() {
       }
     };
     reader.readAsArrayBuffer(file);
-    e.target.value = ''; // Reset input
+    if (fileOrEvent && fileOrEvent.target && 'value' in fileOrEvent.target) {
+      fileOrEvent.target.value = ''; // Reset input
+    }
   };
 
   const downloadTemplate = () => {
@@ -1740,13 +2097,32 @@ export default function App() {
     setMsg({ type: 'success', text: 'Template downloaded successfully' });
   };
 
-  const handlePrint = () => {
+  const handlePrint = (ids?: string[]) => {
     const originalTitle = document.title;
-    document.title = `Uniform_Sales_Report_${new Date().toLocaleDateString().replace(/\//g, '-')}`;
+    const dateStr = new Date().toLocaleDateString().replace(/\//g, '-');
+    document.title = ids ? `Selected_Uniform_Sales_${dateStr}` : `Filtered_Uniform_Sales_${dateStr}`;
+    
+    // Create a temporary style to hide non-selected rows if ids are provided
+    let styleEl: HTMLStyleElement | null = null;
+    if (ids && ids.length > 0) {
+      styleEl = document.createElement('style');
+      styleEl.innerHTML = `
+        @media print {
+          tbody tr:not(.printable-row),
+          .mobile-record-card:not(.printable-row) { display: none !important; }
+        }
+      `;
+      document.head.appendChild(styleEl);
+    }
+
     window.print();
+
     setTimeout(() => {
       document.title = originalTitle;
-    }, 100);
+      if (styleEl) {
+        document.head.removeChild(styleEl);
+      }
+    }, 500);
   };
 
   return (
@@ -1874,7 +2250,7 @@ export default function App() {
                     { id: 'ledger', icon: History, label: 'All Transactions' },
                     { id: 'reports', icon: BarChart3, label: 'Performance Reports' },
                     { id: 'profile', icon: UserCircle, label: 'User Profile' },
-                    ...(user?.role === 'Admin' ? [{ id: 'admin', icon: Settings, label: 'System Settings' }] : []),
+                    ...(can('manage-settings') || can('manage-users') ? [{ id: 'admin', icon: Settings, label: 'System Settings' }] : []),
                   ].map(tab => (
                     <button
                       key={tab.id}
@@ -1967,26 +2343,34 @@ export default function App() {
                 { id: 'ledger', icon: History, label: 'Transactions' },
                 { id: 'reports', icon: BarChart3, label: 'Analytics' },
                 { id: 'profile', icon: UserCircle, label: 'Account' },
-                ...(user?.role === 'Admin' ? [{ id: 'admin', icon: Settings, label: 'Settings' }] : []),
+                ...(can('manage-settings') || can('manage-users') ? [{ id: 'admin', icon: Settings, label: 'Settings' }] : []),
               ].map(tab => (
                 <button
                   key={tab.id}
                   onClick={() => setActiveTab(tab.id as any)}
                   className={`w-full flex items-center gap-4 px-4 py-3.5 rounded-2xl transition-all relative group ${
                     activeTab === tab.id 
-                      ? 'bg-blue-600/10 text-blue-400 font-black shadow-inner shadow-blue-500/10' 
+                      ? 'text-white font-black' 
                       : 'text-slate-400 hover:text-white hover:bg-white/5'
                   }`}
                 >
                   {activeTab === tab.id && (
-                    <motion.div 
-                      layoutId="sidebarActiveIndicator"
-                      className="absolute left-0 w-1 y-2 h-8 bg-blue-500 rounded-r-full shadow-lg shadow-blue-500/50"
-                    />
+                    <>
+                      <motion.div 
+                        layoutId="sidebarActiveBackground"
+                        className="absolute inset-0 bg-gradient-to-r from-blue-600 to-indigo-600 rounded-2xl -z-10 shadow-lg shadow-blue-600/20"
+                        transition={{ type: "spring", stiffness: 380, damping: 32 }}
+                      />
+                      <motion.div 
+                        layoutId="sidebarActiveIndicator"
+                        className="absolute left-1 top-1/2 -translate-y-1/2 w-1 h-6 bg-white rounded-full shadow-md shadow-white/50"
+                        transition={{ type: "spring", stiffness: 380, damping: 32 }}
+                      />
+                    </>
                   )}
-                  <tab.icon size={20} className={`flex-shrink-0 ${activeTab === tab.id ? 'text-blue-400' : 'text-slate-500 group-hover:text-blue-300'} transition-colors`} />
+                  <tab.icon size={20} className={`relative z-10 flex-shrink-0 ${activeTab === tab.id ? 'text-white animate-pulse' : 'text-slate-500 group-hover:text-blue-300'} transition-colors`} />
                   {!isSidebarCollapsed && (
-                    <span className="text-xs uppercase tracking-[0.2em]">{tab.label}</span>
+                    <span className="relative z-10 text-xs uppercase tracking-[0.2em]">{tab.label}</span>
                   )}
                   {isSidebarCollapsed && (
                     <div className="absolute left-16 bg-slate-900 border border-slate-700 px-3 py-2 rounded-lg text-xs font-black uppercase tracking-widest opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all whitespace-nowrap z-50 shadow-xl">
@@ -2126,112 +2510,412 @@ export default function App() {
                 </div>
               )}
 
-               <form onSubmit={handleEmailAuth} className="w-full space-y-4">
-                <div className="space-y-3">
-                   {isSignUp && (
-                     <motion.div 
-                        initial={{ opacity: 0, y: -10 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        className="relative"
-                     >
-                        <UserIcon className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={16} />
-                        <input 
-                          type="text" 
-                          required 
-                          placeholder="Full Name" 
-                          value={name}
-                          onChange={(e) => setName(e.target.value)}
-                          className="w-full pl-12 pr-4 py-3.5 bg-white border border-slate-200 rounded-2xl outline-none focus:border-blue-500 transition-all font-medium text-sm shadow-sm"
-                        />
-                     </motion.div>
-                   )}
-                  <div className="relative">
-                    <Mail className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={16} />
-                    <input 
-                      type="email" 
-                      required 
-                      placeholder="Email Address" 
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      className="w-full pl-12 pr-4 py-3.5 bg-white border border-slate-200 rounded-2xl outline-none focus:border-blue-500 transition-all font-medium text-sm shadow-sm"
-                    />
-                  </div>
-                  <div className="relative">
-                    <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={16} />
-                    <input 
-                      type="password" 
-                      required 
-                      placeholder="Password" 
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      className="w-full pl-12 pr-4 py-3.5 bg-white border border-slate-200 rounded-2xl outline-none focus:border-blue-500 transition-all font-medium text-sm shadow-sm"
-                    />
-                  </div>
-                </div>
-                <button 
-                  type="submit"
-                  disabled={loginLoading}
-                  className="w-full bg-slate-900 text-white py-4 rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-blue-600 transition-all shadow-xl disabled:opacity-50"
+               <form 
+                  onSubmit={isSignUp ? (signUpMethod === 'email' ? createAccountByEmail : (signUpStep === 'otp' ? verifyAndCreateAccount : triggerOtpVerification)) : handleEmailAuth} 
+                  className="w-full space-y-4"
                 >
-                  {loginLoading ? 'Authenticating...' : (isSignUp ? 'Create Account' : 'Login')}
-                </button>
+                  {isSignUp && signUpStep === 'form' && (
+                    <div className="flex border border-slate-200 p-1 bg-slate-100 rounded-2xl mb-4 self-stretch">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSignUpMethod('phone');
+                          setLoginError(null);
+                        }}
+                        className={`flex-1 flex flex-col items-center justify-center py-2.5 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all gap-1 ${
+                          signUpMethod === 'phone'
+                            ? 'bg-white text-slate-900 shadow-sm font-black'
+                            : 'text-slate-400 hover:text-slate-700 font-bold'
+                        }`}
+                      >
+                        <Smartphone size={14} />
+                        <span>Phone No.</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSignUpMethod('email');
+                          setLoginError(null);
+                        }}
+                        className={`flex-1 flex flex-col items-center justify-center py-2.5 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all gap-1 ${
+                          signUpMethod === 'email'
+                            ? 'bg-white text-slate-900 shadow-sm font-black'
+                            : 'text-slate-400 hover:text-slate-700 font-bold'
+                        }`}
+                      >
+                        <Mail size={14} />
+                        <span>Email</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSignUpMethod('google');
+                          setLoginError(null);
+                        }}
+                        className={`flex-1 flex flex-col items-center justify-center py-2.5 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all gap-1 ${
+                          signUpMethod === 'google'
+                            ? 'bg-white text-slate-900 shadow-sm font-black'
+                            : 'text-slate-400 hover:text-slate-700 font-bold'
+                        }`}
+                      >
+                        <UserCircle size={14} />
+                        <span>Google Acc.</span>
+                      </button>
+                    </div>
+                  )}
 
-                {!isSignUp && (
-                  <button 
-                    type="button"
-                    onClick={handleResetPassword}
-                    className="text-xs font-bold text-slate-400 hover:text-blue-600 uppercase tracking-widest block mx-auto py-2"
-                  >
-                    Forgot Credentials?
-                  </button>
-                )}
-
-                <div className="relative py-4">
-                  <div className="absolute inset-0 flex items-center">
-                    <div className="w-full border-t border-slate-200"></div>
-                  </div>
-                  <div className="relative flex justify-center text-xs uppercase font-black tracking-widest">
-                    <span className="bg-slate-50 px-4 text-slate-400">Signup</span>
-                  </div>
-                </div>
-
-                <button 
-                  type="button"
-                  onClick={signInWithGoogle}
-                  disabled={loginLoading}
-                  className="w-full bg-white border border-slate-200 text-slate-700 py-4 rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-slate-50 transition-all shadow-sm flex items-center justify-center gap-3 disabled:opacity-50"
-                >
-                  <svg className="w-4 h-4" viewBox="0 0 24 24">
-                    <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
-                    <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
-                    <path fill="#FBBC05" d="M5.84 14.1c-.22-.66-.35-1.36-.35-2.1s.13-1.44.35-2.1V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l3.66-2.84z"/>
-                    <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
-                    <path fill="none" d="M1 1h22v22H1z"/>
-                  </svg>
-                  Continue with Google
-                </button>
-
-                <div className="pt-6">
-                  <button 
-                    type="button"
-                    onClick={() => {
-                        setIsSignUp(!isSignUp);
-                        setLoginError(null);
-                    }}
-                    className="w-full py-4 rounded-2xl text-xs font-black uppercase tracking-widest text-slate-400 hover:text-blue-600 border border-transparent hover:border-blue-100 hover:bg-blue-50 transition-all"
-                  >
-                    {isSignUp ? (
-                        <>Already registered? <span className="text-blue-600 ml-1">Secure Sign In</span></>
-                    ) : (
-                        <>New User? <span className="text-blue-600 ml-1">Create Account</span></>
+                  <AnimatePresence>
+                    {otpAlertCode && (
+                      <motion.div 
+                        initial={{ opacity: 0, y: -10, scale: 0.95 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: -10, scale: 0.95 }}
+                        className="w-full bg-slate-900 border border-slate-800 text-slate-100 p-4 rounded-xl shadow-xl text-left flex gap-3 relative overflow-hidden mt-2 mb-4 animate-pulse-slow"
+                      >
+                        <div className="absolute right-0 top-0 bottom-0 w-1 bg-indigo-500" />
+                        <span className="text-lg">💬</span>
+                        <div className="flex-1 space-y-1">
+                          <div className="flex justify-between items-center">
+                            <span className="text-[9px] font-black tracking-widest text-slate-400 uppercase">SMS Verification Gateway</span>
+                            <span className="text-[9px] font-medium text-indigo-400 animate-pulse">Received Now</span>
+                          </div>
+                          <p className="text-[11px] text-slate-300 font-medium leading-relaxed">
+                            CRM SMS: Please enter verification OTP code <strong className="bg-indigo-950 text-indigo-300 border border-indigo-800 px-1.5 py-0.5 rounded text-xs font-mono font-black select-all tracking-widest">{otpAlertCode}</strong> to complete phone registration.
+                          </p>
+                        </div>
+                      </motion.div>
                     )}
+                  </AnimatePresence>
+
+                  <div className="space-y-3">
+                    {isSignUp ? (
+                      signUpStep === 'form' ? (
+                        signUpMethod === 'phone' ? (
+                          <>
+                            {/* Name Field */}
+                            <motion.div 
+                              initial={{ opacity: 0, y: -5 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              className="relative"
+                            >
+                              <UserIcon className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={16} />
+                              <input 
+                                type="text" 
+                                required 
+                                placeholder="Full Name" 
+                                value={name}
+                                onChange={(e) => setName(e.target.value)}
+                                className="w-full pl-12 pr-4 py-3.5 bg-white border border-slate-200 rounded-2xl outline-none focus:border-blue-500 transition-all font-medium text-sm shadow-sm"
+                              />
+                            </motion.div>
+
+                            {/* Username Field */}
+                            <motion.div 
+                              initial={{ opacity: 0, y: -5 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              className="relative"
+                            >
+                              <UserIcon className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={16} />
+                              <input 
+                                type="text" 
+                                required 
+                                placeholder="Choose Username" 
+                                value={username}
+                                onChange={(e) => setUsername(e.target.value)}
+                                className="w-full pl-12 pr-4 py-3.5 bg-white border border-slate-200 rounded-2xl outline-none focus:border-blue-500 transition-all font-medium text-sm shadow-sm"
+                              />
+                            </motion.div>
+
+                            {/* Mobile Phone Field */}
+                            <motion.div 
+                              initial={{ opacity: 0, y: -5 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              className="relative"
+                            >
+                              <Smartphone className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={16} />
+                              <input 
+                                type="text" 
+                                required 
+                                placeholder="10-Digit Mobile Number" 
+                                value={phone}
+                                onChange={(e) => setPhone(e.target.value)}
+                                className="w-full pl-12 pr-4 py-3.5 bg-white border border-slate-200 rounded-2xl outline-none focus:border-blue-500 transition-all font-medium text-sm shadow-sm"
+                              />
+                            </motion.div>
+
+                            {/* Choose Password Field */}
+                            <motion.div 
+                              className="relative"
+                            >
+                              <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={16} />
+                              <input 
+                                type="password" 
+                                required 
+                                placeholder="Choose Password (Min 6 chars)" 
+                                value={password}
+                                onChange={(e) => setPassword(e.target.value)}
+                                className="w-full pl-12 pr-4 py-3.5 bg-white border border-slate-200 rounded-2xl outline-none focus:border-blue-500 transition-all font-medium text-sm shadow-sm"
+                              />
+                            </motion.div>
+                          </>
+                        ) : signUpMethod === 'email' ? (
+                          <>
+                            {/* Name Field */}
+                            <motion.div 
+                              initial={{ opacity: 0, y: -5 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              className="relative"
+                            >
+                              <UserIcon className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={16} />
+                              <input 
+                                type="text" 
+                                required 
+                                placeholder="Full Name" 
+                                value={name}
+                                onChange={(e) => setName(e.target.value)}
+                                className="w-full pl-12 pr-4 py-3.5 bg-white border border-slate-200 rounded-2xl outline-none focus:border-blue-500 transition-all font-medium text-sm shadow-sm"
+                              />
+                            </motion.div>
+
+                            {/* Username Field */}
+                            <motion.div 
+                              initial={{ opacity: 0, y: -5 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              className="relative"
+                            >
+                              <UserIcon className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={16} />
+                              <input 
+                                type="text" 
+                                required 
+                                placeholder="Choose Username" 
+                                value={username}
+                                onChange={(e) => setUsername(e.target.value)}
+                                className="w-full pl-12 pr-4 py-3.5 bg-white border border-slate-200 rounded-2xl outline-none focus:border-blue-500 transition-all font-medium text-sm shadow-sm"
+                              />
+                            </motion.div>
+
+                            {/* Email Field */}
+                            <motion.div 
+                              initial={{ opacity: 0, y: -5 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              className="relative"
+                            >
+                              <Mail className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={16} />
+                              <input 
+                                type="email" 
+                                required 
+                                placeholder="Email Address" 
+                                value={email}
+                                onChange={(e) => setEmail(e.target.value)}
+                                className="w-full pl-12 pr-4 py-3.5 bg-white border border-slate-200 rounded-2xl outline-none focus:border-blue-500 transition-all font-medium text-sm shadow-sm"
+                              />
+                            </motion.div>
+
+                            {/* Choose Password Field */}
+                            <motion.div 
+                              className="relative"
+                            >
+                              <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={16} />
+                              <input 
+                                type="password" 
+                                required 
+                                placeholder="Choose Password (Min 6 chars)" 
+                                value={password}
+                                onChange={(e) => setPassword(e.target.value)}
+                                className="w-full pl-12 pr-4 py-3.5 bg-white border border-slate-200 rounded-2xl outline-none focus:border-blue-500 transition-all font-medium text-sm shadow-sm"
+                              />
+                            </motion.div>
+                          </>
+                        ) : (
+                          <motion.div 
+                            initial={{ opacity: 0, scale: 0.95 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            className="bg-slate-50 border border-slate-100 p-6 rounded-2xl space-y-4 text-center mt-2"
+                          >
+                            <p className="text-xs text-slate-500 leading-relaxed font-semibold">
+                              Join Uniform Sales CRM securely by registering with your Google identity. Complete the process in one click.
+                            </p>
+                            <button 
+                              type="button"
+                              onClick={signInWithGoogle}
+                              disabled={loginLoading}
+                              className="w-full bg-white border border-slate-200 text-slate-700 py-3.5 rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-slate-50 transition-all shadow-sm flex items-center justify-center gap-3 disabled:opacity-50"
+                            >
+                              <svg className="w-4 h-4" viewBox="0 0 24 24">
+                                <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                                <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                                <path fill="#FBBC05" d="M5.84 14.1c-.22-.66-.35-1.36-.35-2.1s.13-1.44.35-2.1V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l3.66-2.84z"/>
+                                <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+                                <path fill="none" d="M1 1h22v22H1z"/>
+                              </svg>
+                              Continue with Google
+                            </button>
+                          </motion.div>
+                        )
+                      ) : (
+                        <>
+                          {/* OTP Field */}
+                          <motion.div 
+                            initial={{ opacity: 0, scale: 0.95 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            className="space-y-2 animate-fade-in"
+                          >
+                            <p className="text-[11px] font-bold text-slate-500 uppercase tracking-wider text-left">Confirm Mobile OTP Verification</p>
+                            <div className="relative">
+                              <Hash className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={16} />
+                              <input 
+                                type="text" 
+                                required 
+                                maxLength={6}
+                                placeholder="Enter 6-digit OTP Code" 
+                                value={enteredOtp}
+                                onChange={(e) => setEnteredOtp(e.target.value)}
+                                className="w-full pl-12 pr-4 py-3.5 bg-white border border-slate-200 rounded-2xl outline-none text-center font-black tracking-widest text-lg text-slate-800 focus:border-blue-500 transition-all shadow-sm"
+                              />
+                            </div>
+                            <div className="flex justify-between items-center px-1">
+                              <span className="text-[10px] text-slate-400 font-medium">OTP sent to: {phone}</span>
+                              <button 
+                                type="button" 
+                                onClick={resendOtpCode}
+                                className="text-[10px] text-indigo-600 hover:underline font-bold"
+                              >
+                                Resend SMS OTP
+                              </button>
+                            </div>
+                          </motion.div>
+                        </>
+                      )
+                    ) : (
+                      <>
+                        {/* Login Fields */}
+                        <div className="relative">
+                          <UserIcon className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={16} />
+                          <input 
+                            type="text" 
+                            required 
+                            placeholder="Username, Phone, or Email" 
+                            value={email}
+                            onChange={(e) => setEmail(e.target.value)}
+                            className="w-full pl-12 pr-4 py-3.5 bg-white border border-slate-200 rounded-2xl outline-none focus:border-blue-500 transition-all font-medium text-sm shadow-sm"
+                          />
+                        </div>
+                        <div className="relative">
+                          <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={16} />
+                          <input 
+                            type="password" 
+                            required 
+                            placeholder="Password" 
+                            value={password}
+                            onChange={(e) => setPassword(e.target.value)}
+                            className="w-full pl-12 pr-4 py-3.5 bg-white border border-slate-200 rounded-2xl outline-none focus:border-blue-500 transition-all font-medium text-sm shadow-sm"
+                          />
+                        </div>
+                      </>
+                    )}
+                  </div>
+
+                  {/* Submit Button */}
+                  {(!isSignUp || signUpMethod !== 'google') && (
+                    <button 
+                      type="submit"
+                      disabled={loginLoading}
+                      className="w-full bg-slate-900 text-white py-4 rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-blue-600 transition-all shadow-xl disabled:opacity-50 flex items-center justify-center gap-2"
+                    >
+                      {loginLoading ? 'Processing...' : (
+                        isSignUp ? (
+                          signUpMethod === 'email' ? 'Create Account with Email' : (
+                            signUpStep === 'otp' ? 'Verify & Create Account' : 'Get OTP & Register'
+                          )
+                        ) : 'Secure Sign In'
+                      )}
+                    </button>
+                  )}
+
+                  {isSignUp && signUpStep === 'otp' && (
+                    <button 
+                      type="button"
+                      onClick={() => {
+                        setSignUpStep('form');
+                        setLoginError(null);
+                        setOtpAlertCode(null);
+                      }}
+                      className="text-xs font-bold text-slate-400 hover:text-blue-600 uppercase tracking-widest block mx-auto py-2"
+                    >
+                      ← Back to Details
+                    </button>
+                  )}
+
+                  {!isSignUp && (
+                    <button 
+                      type="button"
+                      onClick={handleResetPassword}
+                      className="text-xs font-bold text-slate-400 hover:text-blue-600 uppercase tracking-widest block mx-auto py-2"
+                    >
+                      Forgot Credentials?
+                    </button>
+                  )}
+
+                  <div className="relative py-4">
+                    <div className="absolute inset-0 flex items-center">
+                      <div className="w-full border-t border-slate-200"></div>
+                    </div>
+                    <div className="relative flex justify-center text-xs uppercase font-black tracking-widest">
+                      <span className="bg-slate-50 px-4 text-slate-400">Signup</span>
+                    </div>
+                  </div>
+
+                  <button 
+                    type="button"
+                    onClick={signInWithGoogle}
+                    disabled={loginLoading}
+                    className="w-full bg-white border border-slate-200 text-slate-700 py-4 rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-slate-50 transition-all shadow-sm flex items-center justify-center gap-3 disabled:opacity-50"
+                  >
+                    <svg className="w-4 h-4" viewBox="0 0 24 24">
+                      <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                      <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                      <path fill="#FBBC05" d="M5.84 14.1c-.22-.66-.35-1.36-.35-2.1s.13-1.44.35-2.1V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l3.66-2.84z"/>
+                      <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+                      <path fill="none" d="M1 1h22v22H1z"/>
+                    </svg>
+                    Continue with Google
                   </button>
-                </div>
-              </form>
+
+                  <div className="pt-6">
+                    <button 
+                      type="button"
+                      onClick={() => {
+                          setIsSignUp(!isSignUp);
+                          setSignUpStep('form');
+                          setLoginError(null);
+                          setVerificationOtp('');
+                          setEnteredOtp('');
+                          setOtpAlertCode(null);
+                      }}
+                      className="w-full py-4 rounded-2xl text-xs font-black uppercase tracking-widest text-slate-400 hover:text-blue-600 border border-transparent hover:border-blue-100 hover:bg-blue-50 transition-all"
+                    >
+                      {isSignUp ? (
+                          <>Already registered? <span className="text-blue-600 ml-1">Secure Sign In</span></>
+                      ) : (
+                          <>New User? <span className="text-blue-600 ml-1">Create Account</span></>
+                      )}
+                    </button>
+                  </div>
+                </form>
               <div className="text-xs text-slate-400 font-bold uppercase tracking-widest">Authorized Personnel Only</div>
             </motion.div>
+          ) : dataLoading ? (
+            <motion.div 
+              key="data-loading" 
+              initial={{ opacity: 0 }} 
+              animate={{ opacity: 1 }} 
+              exit={{ opacity: 0 }}
+              className="w-full mt-8"
+            >
+              <UnifiedSkeletonLoader />
+            </motion.div>
           ) : (
-            <>
+            <AnimatePresence mode="wait" initial={false}>
           {activeTab === 'dashboard' && (
             <motion.div 
               key="dashboard"
@@ -2633,8 +3317,6 @@ export default function App() {
                 pricing={pricing}
                 itemOrder={itemOrder}
                 updateItemOrder={updateItemOrder}
-                handleMove={handleMove}
-                handleMoveSize={handleMoveSize}
                 handlePriceChange={handlePriceChange}
                 handleStockChange={handleStockChange}
                 handleMinStockChange={handleMinStockChange}
@@ -2762,13 +3444,19 @@ export default function App() {
                 setSelectedRecordIds={setSelectedRecordIds}
                 bulkDeleteRecords={bulkDeleteRecords}
                 bulkUpdateStatus={bulkUpdateStatus}
+                bulkApplyDiscount={bulkApplyDiscount}
+                bulkArchiveRecords={bulkArchiveRecords}
+                bulkUpdateRecords={bulkUpdateRecords}
+                showArchived={showArchived}
+                setShowArchived={setShowArchived}
+                showBulkEditModal={showBulkEditModal}
+                setShowBulkEditModal={setShowBulkEditModal}
                 customFields={customFields}
                 onSort={handleSort}
                 sortConfig={sortConfig}
                 downloadTemplate={downloadTemplate}
                 grandTotal={filteredRecords.reduce((sum, r) => sum + r.totalAmount, 0)}
                 pricing={pricing}
-                itemOrder={itemOrder}
                 can={can}
                 getNextSrNo={getNextSrNo}
                 setMsg={setMsg}
@@ -2827,7 +3515,7 @@ export default function App() {
             </motion.div>
           )}
 
-          {activeTab === 'admin' && user?.role === 'Admin' && (
+          {activeTab === 'admin' && (can('manage-settings') || can('manage-users')) && (
             <motion.div 
               key="admin"
               id="admin-panel"
@@ -2853,7 +3541,7 @@ export default function App() {
               />
             </motion.div>
           )}
-          </>
+          </AnimatePresence>
           )}
         </AnimatePresence>
 
@@ -3017,9 +3705,12 @@ export default function App() {
 
 function ProfileSection({ user, setUser, logout }: any) {
   const [name, setName] = useState(user?.name || '');
+  const [username, setUsername] = useState(user?.username || '');
+  const [phone, setPhone] = useState(user?.phone || '');
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [msg, setMsg] = useState<{ type: 'success' | 'error', text: string } | null>(null);
+  const [isUpdating, setIsUpdating] = useState(false);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -3065,16 +3756,36 @@ function ProfileSection({ user, setUser, logout }: any) {
     }
   };
 
-  const handleUpdateName = async (e: React.FormEvent) => {
+  const handleUpdateProfile = async (e: React.FormEvent) => {
     e.preventDefault();
+    setIsUpdating(true);
     try {
-      await updateDoc(doc(db, 'users', user.id), { name });
-      const updatedUser = { ...user, name };
+      // If username changed, check for uniqueness
+      if (username && username !== user.username) {
+        const usersRef = collection(db, 'users');
+        const allUsersSnapshot = await getDocs(usersRef);
+        const duplicate = allUsersSnapshot.docs.find(d => 
+          d.id !== user.id && d.data().username?.toLowerCase() === username.toLowerCase()
+        );
+        
+        if (duplicate) {
+          setMsg({ type: 'error', text: 'Username already taken. Please choose another.' });
+          setIsUpdating(false);
+          return;
+        }
+      }
+
+      const updates: any = { name, phone };
+      if (username) updates.username = username;
+
+      await updateDoc(doc(db, 'users', user.id), updates);
+      const updatedUser = { ...user, ...updates };
       setUser(updatedUser);
-      setMsg({ type: 'success', text: 'Profile name updated successfully.' });
+      setMsg({ type: 'success', text: 'Profile updated successfully.' });
     } catch (err) {
-      setMsg({ type: 'error', text: 'Failed to update name in database.' });
+      setMsg({ type: 'error', text: 'Failed to update profile in database.' });
     }
+    setIsUpdating(false);
     setTimeout(() => setMsg(null), 3000);
   };
 
@@ -3174,13 +3885,39 @@ function ProfileSection({ user, setUser, logout }: any) {
 
              <div className="grid grid-cols-1 md:grid-cols-2 gap-8 pt-4">
                 {/* Identity Form */}
-                <form onSubmit={handleUpdateName} className="space-y-6 bg-slate-50/50 p-6 rounded-3xl border border-slate-100">
+                <form onSubmit={handleUpdateProfile} className="space-y-6 bg-slate-50/50 p-6 rounded-3xl border border-slate-100">
                    <div className="flex items-center gap-3 mb-2">
                      <div className="p-2 bg-blue-100 text-blue-600 rounded-xl"><UserIcon size={14} /></div>
                      <h3 className="text-[11px] font-black uppercase tracking-widest text-slate-900">Identification</h3>
                    </div>
                    
                    <div className="space-y-4">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div className="space-y-1.5">
+                           <label className="text-[9px] font-black uppercase text-slate-400 ml-1">Unique Username</label>
+                           <div className="relative">
+                             <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 font-mono text-xs">@</span>
+                             <input 
+                               type="text" 
+                               value={username}
+                               onChange={(e) => setUsername(e.target.value.toLowerCase().replace(/\s+/g, ''))}
+                               className="w-full pl-8 pr-5 py-4 bg-white border border-slate-200 rounded-2xl text-slate-900 font-bold text-sm focus:border-blue-600 focus:ring-8 focus:ring-blue-600/5 outline-none transition-all shadow-sm"
+                               placeholder="choose_username"
+                             />
+                           </div>
+                        </div>
+                        <div className="space-y-1.5">
+                           <label className="text-[9px] font-black uppercase text-slate-400 ml-1">Contact Phone</label>
+                           <input 
+                             type="tel" 
+                             value={phone}
+                             onChange={(e) => setPhone(e.target.value)}
+                             className="w-full px-5 py-4 bg-white border border-slate-200 rounded-2xl text-slate-900 font-bold text-sm focus:border-blue-600 focus:ring-8 focus:ring-blue-600/5 outline-none transition-all shadow-sm"
+                             placeholder="+91 00000 00000"
+                           />
+                        </div>
+                      </div>
+
                       <div className="space-y-1.5">
                          <label className="text-[9px] font-black uppercase text-slate-400 ml-1 flex items-center gap-2">
                            Email Identity
@@ -3209,8 +3946,13 @@ function ProfileSection({ user, setUser, logout }: any) {
                            placeholder="Enter your name"
                          />
                       </div>
-                      <button type="submit" className="w-full py-4 bg-slate-900 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-800 transition-all shadow-xl active:scale-95 group flex items-center justify-center gap-2">
-                        Sync Changes <RefreshCw size={14} className="group-hover:rotate-180 transition-transform duration-700" />
+                      <button 
+                        type="submit"
+                        disabled={isUpdating}
+                        className="w-full py-4 bg-slate-900 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-800 transition-all shadow-xl active:scale-95 group flex items-center justify-center gap-2 disabled:opacity-50"
+                      >
+                        {isUpdating ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} className="group-hover:rotate-180 transition-transform duration-700" />}
+                        {isUpdating ? 'Saving Profile...' : 'Sync Changes'}
                       </button>
                    </div>
                 </form>
@@ -3728,7 +4470,7 @@ function ReportsSection({
 
   const filteredData = useMemo(() => {
     if (!reportReady) return [];
-    return records.filter((r: SaleRecord) => {
+    return records.filter((r: SaleRecord) => !r.isArchived).filter((r: SaleRecord) => {
       const matchesDateStart = !dateStart || r.date >= dateStart;
       const matchesDateEnd = !dateEnd || r.date <= dateEnd;
       const matchesClass = classFilter === 'All' || r.studentClass === classFilter;
@@ -3744,30 +4486,38 @@ function ReportsSection({
     const totalItems = filteredData.reduce((sum: number, r: SaleRecord) => sum + r.items.reduce((s, i) => s + i.qty, 0), 0);
 
     // Sales by Date for Chart
-    const dateMap: Record<string, number> = {};
-    const itemMap: Record<string, number> = {};
-    const classMap: Record<string, number> = {};
+    const dateMap: Record<string, { amount: number, count: number }> = {};
+    const itemMap: Record<string, { value: number, count: number }> = {};
+    const classMap: Record<string, { value: number, count: number }> = {};
 
     filteredData.forEach((r: SaleRecord) => {
-      dateMap[r.date] = (dateMap[r.date] || 0) + r.totalAmount;
+      if (!dateMap[r.date]) dateMap[r.date] = { amount: 0, count: 0 };
+      dateMap[r.date].amount += r.totalAmount;
+      dateMap[r.date].count += 1;
+
       if (r.studentClass) {
-        classMap[r.studentClass] = (classMap[r.studentClass] || 0) + r.totalAmount;
+        if (!classMap[r.studentClass]) classMap[r.studentClass] = { value: 0, count: 0 };
+        classMap[r.studentClass].value += r.totalAmount;
+        classMap[r.studentClass].count += 1;
       }
+
       r.items.forEach(i => {
-        itemMap[i.item] = (itemMap[i.item] || 0) + (i.qty * i.rate);
+        if (!itemMap[i.item]) itemMap[i.item] = { value: 0, count: 0 };
+        itemMap[i.item].value += (i.qty * i.rate);
+        itemMap[i.item].count += i.qty;
       });
     });
 
     const timeline = Object.entries(dateMap)
-      .map(([date, amount]) => ({ date, amount }))
+      .map(([date, data]) => ({ date, amount: data.amount, count: data.count }))
       .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
     const itemContribution = Object.entries(itemMap)
-      .map(([name, value]) => ({ name, value }))
+      .map(([name, data]) => ({ name, value: data.value, count: data.count }))
       .sort((a, b) => b.value - a.value);
 
     const classContribution = Object.entries(classMap)
-      .map(([name, value]) => ({ name, value }))
+      .map(([name, data]) => ({ name, value: data.value, count: data.count }))
       .sort((a, b) => b.value - a.value);
 
     return { totalRev, totalPaid, totalPending, totalItems, timeline, itemContribution, classContribution };
@@ -3775,10 +4525,26 @@ function ReportsSection({
 
   const CustomTooltip = ({ active, payload, label }: any) => {
     if (active && payload && payload.length) {
+      const data = payload[0].payload;
       return (
-        <div className="bg-white/90 backdrop-blur-md p-4 rounded-2xl shadow-2xl border border-slate-100 ring-1 ring-black/5">
-          <p className="text-xs font-black uppercase tracking-widest text-slate-400 mb-1">{label}</p>
-          <p className="text-sm font-black text-slate-900">₹{payload[0].value.toLocaleString()}</p>
+        <div className="bg-white/95 backdrop-blur-md p-4 rounded-2xl shadow-2xl border border-slate-100 ring-1 ring-black/5 animate-in fade-in zoom-in duration-200">
+          <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2 truncate max-w-[150px]">{label}</p>
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between gap-6">
+              <span className="text-[10px] font-bold text-slate-500 uppercase">Revenue</span>
+              <span className="text-sm font-black text-slate-900 font-mono">₹{(data.amount || data.value).toLocaleString()}</span>
+            </div>
+            {data.count !== undefined && (
+              <div className="flex items-center justify-between gap-6">
+                <span className="text-[10px] font-bold text-slate-500 uppercase">Volume</span>
+                <span className="text-xs font-black text-blue-600 font-mono">{data.count} {data.count === 1 ? 'Record' : 'Records'}</span>
+              </div>
+            )}
+          </div>
+          <div className="mt-2 pt-2 border-t border-slate-50 flex items-center gap-1.5">
+            <div className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />
+            <span className="text-[8px] font-black text-slate-300 uppercase tracking-tighter">Live Intelligence</span>
+          </div>
         </div>
       );
     }
@@ -3960,36 +4726,42 @@ function ReportsSection({
               </div>
               <div className="h-[320px] w-full">
                 <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={reportStats.timeline}>
+                  <AreaChart data={reportStats.timeline}>
                     <defs>
-                      <linearGradient id="lineGradient" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#2563eb" stopOpacity={0.1}/>
+                      <linearGradient id="areaGradient" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#2563eb" stopOpacity={0.2}/>
                         <stop offset="95%" stopColor="#2563eb" stopOpacity={0}/>
                       </linearGradient>
                     </defs>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f8fafc" />
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
                     <XAxis 
                       dataKey="date" 
                       axisLine={false} 
                       tickLine={false} 
                       tick={{ fontSize: 10, fill: '#94a3b8', fontWeight: 700 }} 
                       dy={10}
+                      tickFormatter={(val) => new Date(val).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
                     />
                     <YAxis 
                       axisLine={false} 
                       tickLine={false} 
                       tick={{ fontSize: 10, fill: '#94a3b8', fontWeight: 700 }} 
+                      tickFormatter={(val) => `₹${val >= 1000 ? (val/1000).toFixed(1) + 'k' : val}`}
                     />
-                    <Tooltip content={<CustomTooltip />} />
-                    <Line 
+                    <Tooltip 
+                      content={<CustomTooltip />} 
+                      cursor={{ stroke: '#2563eb', strokeWidth: 1, strokeDasharray: '4 4' }}
+                    />
+                    <Area 
                       type="monotone" 
                       dataKey="amount" 
                       stroke="#2563eb" 
-                      strokeWidth={4} 
-                      dot={{ r: 0 }} 
-                      activeDot={{ r: 8, fill: '#2563eb', stroke: '#fff', strokeWidth: 4 }} 
+                      strokeWidth={3} 
+                      fillOpacity={1} 
+                      fill="url(#areaGradient)"
+                      activeDot={{ r: 6, fill: '#2563eb', stroke: '#fff', strokeWidth: 3 }} 
                     />
-                  </LineChart>
+                  </AreaChart>
                 </ResponsiveContainer>
               </div>
             </div>
@@ -4022,10 +4794,11 @@ function ReportsSection({
                       tick={{ fontSize: 10, fill: '#64748b', fontWeight: 800 }} 
                       width={120} 
                     />
-                    <Tooltip content={<CustomTooltip />} cursor={{ fill: '#f8fafc' }} />
+                    <Tooltip content={<CustomTooltip />} cursor={{ fill: '#f1f5f9', radius: 12 }} />
                     <Bar 
                       dataKey="value" 
                       fill="#6366f1" 
+                      activeBar={{ fill: '#4f46e5', radius: [0, 16, 16, 0] }}
                       radius={[0, 12, 12, 0]} 
                       barSize={24}
                     />
@@ -4065,10 +4838,11 @@ function ReportsSection({
                       tickLine={false} 
                       tick={{ fontSize: 10, fill: '#94a3b8', fontWeight: 800 }} 
                     />
-                    <Tooltip content={<CustomTooltip />} cursor={{ fill: '#f8fafc' }} />
+                    <Tooltip content={<CustomTooltip />} cursor={{ fill: '#f1f5f9', radius: 12 }} />
                     <Bar 
                       dataKey="value" 
                       fill="#10b981" 
+                      activeBar={{ fill: '#059669', radius: [16, 16, 0, 0] }}
                       radius={[12, 12, 0, 0]} 
                       barSize={40}
                     />
@@ -4395,7 +5169,6 @@ function UnifiedProductItem({
   pricing, 
   itemOrder, 
   handleMove, 
-  handleMoveSize,
   renameItem, 
   deleteItem, 
   selectedItem, 
@@ -4444,20 +5217,20 @@ function UnifiedProductItem({
         <div className="flex items-center gap-3 flex-1 overflow-hidden">
            {/* Precision Controls & Drag Handle */}
            <div className="flex items-center gap-1.5 p-1 bg-white border border-slate-200 rounded-2xl shadow-sm">
-              <div className="flex gap-0.5">
+              <div className="flex flex-col gap-0.5">
                  <button 
-                    onClick={(e) => { e.stopPropagation(); handleMove(item, 'left'); }}
+                    onClick={(e) => { e.stopPropagation(); handleMove(item, 'up'); }}
                     className="p-1.5 hover:bg-blue-50 text-slate-400 hover:text-blue-600 rounded-lg transition-all active:scale-90 disabled:opacity-20"
                     disabled={itemOrder.indexOf(item) === 0}
                  >
-                    <ArrowLeft size={12} strokeWidth={3} />
+                    <ChevronUp size={12} strokeWidth={3} />
                  </button>
                  <button 
-                    onClick={(e) => { e.stopPropagation(); handleMove(item, 'right'); }}
+                    onClick={(e) => { e.stopPropagation(); handleMove(item, 'down'); }}
                     className="p-1.5 hover:bg-blue-50 text-slate-400 hover:text-blue-600 rounded-lg transition-all active:scale-90 disabled:opacity-20"
                     disabled={itemOrder.indexOf(item) === itemOrder.length - 1}
                  >
-                    <ArrowRight size={12} strokeWidth={3} />
+                    <ChevronDown size={12} strokeWidth={3} />
                  </button>
               </div>
               <div 
@@ -4511,40 +5284,22 @@ function UnifiedProductItem({
       </div>
 
       <div className="flex-1 p-6 space-y-4 max-h-[300px] overflow-y-auto custom-scroll">
-        {sizesArray.map(([size, info]: [string, any], idx: number) => (
+        {sizesArray.map(([size, info]: [string, any]) => (
           <div key={size} className="flex flex-col gap-3 p-4 bg-slate-50/50 rounded-2xl border border-slate-100 group/size hover:bg-white hover:border-blue-100 hover:shadow-sm transition-all">
             <div className="flex justify-between items-center">
-              <div className="flex items-center gap-2">
-                 <div className="flex flex-col gap-1 opacity-0 group-hover/size:opacity-100 transition-opacity">
-                    <button 
-                      onClick={() => handleMoveSize(item, size, 'up')}
-                      disabled={idx === 0}
-                      className="text-slate-300 hover:text-blue-600 disabled:opacity-10"
-                    >
-                      <ChevronUp size={10} />
-                    </button>
-                    <button 
-                      onClick={() => handleMoveSize(item, size, 'down')}
-                      disabled={idx === sizesArray.length - 1}
-                      className="text-slate-300 hover:text-blue-600 disabled:opacity-10"
-                    >
-                      <ChevronDown size={10} />
-                    </button>
-                 </div>
-                 <input 
-                  type="text"
-                  defaultValue={size}
-                  onBlur={(e) => {
-                    const newVal = e.target.value.trim();
-                    if (newVal && newVal !== size) {
-                      renameSize(item, size, newVal);
-                    } else {
-                      e.target.value = size;
-                    }
-                  }}
-                  className="text-[10px] font-black uppercase tracking-widest text-slate-400 focus:text-blue-600 outline-none bg-transparent"
-                />
-              </div>
+              <input 
+                type="text"
+                defaultValue={size}
+                onBlur={(e) => {
+                  const newVal = e.target.value.trim();
+                  if (newVal && newVal !== size) {
+                    renameSize(item, size, newVal);
+                  } else {
+                    e.target.value = size;
+                  }
+                }}
+                className="text-[10px] font-black uppercase tracking-widest text-slate-400 focus:text-blue-600 outline-none bg-transparent w-1/2"
+              />
               <button 
                 onClick={() => deleteSize(item, size)}
                 className="opacity-0 group-hover/size:opacity-100 p-1.5 hover:bg-red-50 text-red-400 hover:text-red-600 rounded-lg transition-all"
@@ -4566,11 +5321,14 @@ function UnifiedProductItem({
                     />
                   </div>
                </div>
-               <div className="space-y-1">
+                <div className="space-y-1">
                   <div className="flex justify-between items-center">
                     <span className="text-[8px] font-black uppercase text-slate-400 tracking-tighter">Stock</span>
                     {info.stock <= (info.minStock || 0) && (
-                      <AlertCircle size={10} className="text-red-500 animate-pulse" />
+                      <div className="flex items-center gap-1 bg-red-100 px-1.5 py-0.5 rounded-md animate-pulse">
+                        <AlertCircle size={10} className="text-red-600" />
+                        <span className="text-[8px] font-black text-red-600">CRITICAL</span>
+                      </div>
                     )}
                   </div>
                   <input 
@@ -4578,7 +5336,9 @@ function UnifiedProductItem({
                     value={info.stock}
                     onChange={(e) => handleStockChange(item, size, Number(e.target.value))}
                     className={`w-full px-3 py-2 bg-white border rounded-xl text-xs font-black outline-none focus:border-blue-500 transition-all ${
-                      info.stock <= (info.minStock || 0) ? 'border-red-200 bg-red-50/10' : 'border-slate-200'
+                      info.stock <= (info.minStock || 0) 
+                        ? 'border-red-300 bg-red-50 text-red-700 shadow-sm shadow-red-100 ring-2 ring-red-50' 
+                        : 'border-slate-200'
                     }`}
                   />
                </div>
@@ -4620,8 +5380,6 @@ function UnifiedProductSection({
   pricing, 
   itemOrder, 
   updateItemOrder, 
-  handleMove,
-  handleMoveSize,
   handlePriceChange, 
   handleStockChange, 
   handleMinStockChange,
@@ -4642,6 +5400,8 @@ function UnifiedProductSection({
   const [searchTerm, setSearchTerm] = useState('');
   const [filterLowStock, setFilterLowStock] = useState(false);
   const [selectedItem, setSelectedItem] = useState<string | null>(null);
+  const [showImportDialog, setShowImportDialog] = useState(false);
+  const [showReorderDialog, setShowReorderDialog] = useState(false);
   const jsonFileInputRef = useRef<HTMLInputElement>(null);
   const excelFileInputRef = useRef<HTMLInputElement>(null);
 
@@ -4654,6 +5414,19 @@ function UnifiedProductSection({
     const hasLowStock = Object.values(sizes).some((info: any) => info.stock <= (info.minStock || 0));
     return matchesSearch && hasLowStock;
   });
+
+  const handleMove = (item: string, direction: 'up' | 'down') => {
+    const index = itemOrder.indexOf(item);
+    if (index === -1) return;
+    
+    const newOrder = [...itemOrder];
+    if (direction === 'up' && index > 0) {
+      [newOrder[index], newOrder[index - 1]] = [newOrder[index - 1], newOrder[index]];
+    } else if (direction === 'down' && index < itemOrder.length - 1) {
+      [newOrder[index], newOrder[index + 1]] = [newOrder[index + 1], newOrder[index]];
+    }
+    updateItemOrder(newOrder);
+  };
 
   return (
     <div className="space-y-8 pb-20" onClick={() => setSelectedItem(null)}>
@@ -4695,6 +5468,13 @@ function UnifiedProductSection({
               <AlertCircle size={14} /> {filterLowStock ? 'LOW STOCK ONLY' : 'ALL STOCK'}
             </button>
 
+            <button 
+              onClick={() => setShowReorderDialog(true)}
+              className="px-5 py-3 bg-white border border-slate-200 text-slate-500 rounded-2xl text-xs font-black uppercase tracking-widest hover:border-blue-500 hover:text-blue-600 hover:bg-blue-50 transition-all flex items-center gap-2"
+            >
+              <GripVertical size={14} /> Organize
+            </button>
+
             <div className="h-8 w-px bg-slate-200 hidden lg:block" />
 
             <div className="group relative z-30">
@@ -4721,7 +5501,7 @@ function UnifiedProductSection({
                   <button onClick={downloadPricingTemplate} className="w-full text-left px-5 py-4 text-xs font-black uppercase hover:bg-blue-50 transition-colors flex items-center gap-3 text-blue-600 border-b border-slate-100 font-mono">
                      <FileDown size={18} /> Get Template
                   </button>
-                  <button onClick={() => excelFileInputRef.current?.click()} className="w-full text-left px-5 py-4 text-xs font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-3 text-slate-700 border-b border-slate-100">
+                  <button onClick={() => setShowImportDialog(true)} className="w-full text-left px-5 py-4 text-xs font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-3 text-slate-700 border-b border-slate-100">
                      <FileSpreadsheet size={18} className="text-emerald-500" /> From Spreadsheet
                   </button>
                   <button onClick={() => jsonFileInputRef.current?.click()} className="w-full text-left px-5 py-4 text-xs font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-3 text-slate-700">
@@ -4733,6 +5513,156 @@ function UnifiedProductSection({
         </div>
       </div>
 
+      <AnimatePresence>
+        {showImportDialog && (
+          <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="bg-white w-full max-w-xl rounded-[2.5rem] shadow-2xl border border-slate-200 overflow-hidden"
+            >
+              <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+                <div className="flex items-center gap-4">
+                  <div className="p-3 bg-emerald-100 text-emerald-600 rounded-2xl shadow-sm">
+                    <FileSpreadsheet size={24} />
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-black text-slate-900 uppercase tracking-tight">Import Inventory Data</h3>
+                    <p className="text-slate-500 text-xs font-bold uppercase tracking-widest mt-0.5">XLSX, XLS, OR CSV FORMAT</p>
+                  </div>
+                </div>
+                <button onClick={() => setShowImportDialog(false)} className="p-3 hover:bg-white rounded-2xl text-slate-400 hover:text-slate-600 transition-all border border-transparent hover:border-slate-200">
+                  <X size={20} />
+                </button>
+              </div>
+              
+              <div className="p-8 space-y-8">
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="p-6 bg-blue-50/50 border border-blue-100 rounded-[2rem] space-y-3">
+                    <div className="w-10 h-10 bg-white border border-blue-100 rounded-xl flex items-center justify-center text-blue-600 shadow-sm">
+                      <FileDown size={20} />
+                    </div>
+                    <div className="space-y-1">
+                      <h4 className="text-xs font-black text-slate-900 uppercase tracking-widest">Step 1: Format</h4>
+                      <p className="text-[10px] text-slate-500 font-medium leading-relaxed">Download our standard template to ensure system compatibility.</p>
+                    </div>
+                    <button onClick={downloadPricingTemplate} className="w-full py-3 bg-white border border-blue-200 text-blue-600 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-blue-600 hover:text-white transition-all">
+                      Get Template
+                    </button>
+                  </div>
+
+                  <div className="p-6 bg-emerald-50/50 border border-emerald-100 rounded-[2rem] space-y-3">
+                    <div className="w-10 h-10 bg-white border border-emerald-100 rounded-xl flex items-center justify-center text-emerald-600 shadow-sm">
+                      <UploadCloud size={20} />
+                    </div>
+                    <div className="space-y-1">
+                      <h4 className="text-xs font-black text-slate-900 uppercase tracking-widest">Step 2: Upload</h4>
+                      <p className="text-[10px] text-slate-500 font-medium leading-relaxed">System will auto-detect columns: Item, Size, Price, Stock, & Min Stock.</p>
+                    </div>
+                    <button 
+                      onClick={() => {
+                        setShowImportDialog(false);
+                        excelFileInputRef.current?.click();
+                      }}
+                      className="w-full py-3 bg-emerald-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-500/20"
+                    >
+                      Select File
+                    </button>
+                  </div>
+                </div>
+
+                <div className="bg-slate-50 p-6 rounded-[2rem] border border-slate-100">
+                  <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] mb-4">Required Headers</h4>
+                  <div className="flex flex-wrap gap-2">
+                    {["Item", "Size", "Price", "Stock", "Min Stock"].map(h => (
+                      <span key={h} className="px-3 py-1.5 bg-white border border-slate-200 rounded-full text-[10px] font-bold text-slate-600 shadow-sm">
+                        {h}
+                      </span>
+                    ))}
+                  </div>
+                  <p className="mt-4 text-[9px] text-slate-400 font-bold uppercase leading-relaxed">
+                    Note: Existing items with matching names and sizes will be updated. New items will be added to the catalog.
+                  </p>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showReorderDialog && (
+          <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9 }}
+              className="bg-white w-full max-w-lg rounded-[2.5rem] shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[80vh]"
+            >
+              <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-100/30">
+                <div className="flex items-center gap-4">
+                  <div className="p-3 bg-blue-100 text-blue-600 rounded-2xl">
+                    <GripVertical size={24} />
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-black text-slate-900 uppercase tracking-tight">Display Sequence</h3>
+                    <p className="text-slate-500 text-[10px] font-bold uppercase tracking-widest mt-0.5">Drag items to prioritize them in the console</p>
+                  </div>
+                </div>
+                <button onClick={() => setShowReorderDialog(false)} className="p-3 hover:bg-white rounded-2xl text-slate-400 hover:text-slate-600 transition-all border border-transparent hover:border-slate-200">
+                  <X size={20} />
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-4 custom-scroll">
+                <Reorder.Group axis="y" values={itemOrder} onReorder={updateItemOrder} className="space-y-2">
+                  {itemOrder.map((item: string) => (
+                    <Reorder.Item 
+                      key={item} 
+                      value={item}
+                      className="bg-white border border-slate-200 p-4 rounded-2xl flex items-center justify-between group hover:border-blue-500 hover:shadow-lg hover:shadow-blue-500/5 transition-all cursor-grab active:cursor-grabbing"
+                    >
+                      <div className="flex items-center gap-4">
+                        <GripVertical size={16} className="text-slate-300 group-hover:text-blue-500" />
+                        <span className="text-sm font-black text-slate-900 uppercase truncate max-w-[200px]">{item}</span>
+                      </div>
+                      <div className="flex items-center gap-3">
+                         <button 
+                            type="button"
+                            onClick={() => handleMove(item, 'up')}
+                            disabled={itemOrder.indexOf(item) === 0}
+                            className="p-2 bg-slate-50 text-slate-400 hover:bg-blue-50 hover:text-blue-600 rounded-xl transition-all disabled:opacity-20"
+                         >
+                            <ChevronUp size={14} />
+                         </button>
+                         <button 
+                            type="button"
+                            onClick={() => handleMove(item, 'down')}
+                            disabled={itemOrder.indexOf(item) === itemOrder.length - 1}
+                            className="p-2 bg-slate-50 text-slate-400 hover:bg-blue-50 hover:text-blue-600 rounded-xl transition-all disabled:opacity-20"
+                         >
+                            <ChevronDown size={14} />
+                         </button>
+                      </div>
+                    </Reorder.Item>
+                  ))}
+                </Reorder.Group>
+              </div>
+
+              <div className="p-6 bg-slate-50 border-t border-slate-100">
+                 <button 
+                   onClick={() => setShowReorderDialog(false)}
+                   className="w-full py-4 bg-slate-900 text-white rounded-2xl font-black text-xs uppercase tracking-[0.2em] hover:bg-slate-800 transition-all shadow-xl shadow-slate-900/20"
+                 >
+                   Save Sequence
+                 </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* Main Grid View */}
       <Reorder.Group axis="y" values={itemOrder} onReorder={updateItemOrder} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
         <AnimatePresence mode="popLayout">
@@ -4743,7 +5673,6 @@ function UnifiedProductSection({
               pricing={pricing}
               itemOrder={itemOrder}
               handleMove={handleMove}
-              handleMoveSize={handleMoveSize}
               renameItem={renameItem}
               deleteItem={deleteItem}
               selectedItem={selectedItem}
@@ -5051,11 +5980,6 @@ function SalesFormSection({
                         className="w-full pl-14 pr-6 py-4 bg-slate-50 border-2 border-transparent rounded-[20px] outline-none text-base font-bold focus:bg-white focus:border-blue-500 focus:ring-8 focus:ring-blue-50 transition-all disabled:opacity-50" 
                         placeholder="000"
                       />
-                      <div className="absolute right-4 top-1/2 -translate-y-1/2">
-                        <div className="px-3 py-1 bg-blue-100 text-blue-600 rounded-full text-[8px] font-black uppercase tracking-tighter shadow-sm border border-blue-200">
-                          AUTO-SYNC ACTIVE
-                        </div>
-                      </div>
                     </div>
                   </div>
                   <div className="space-y-3">
@@ -5504,58 +6428,113 @@ function SalesFormSection({
   );
 }
 
-function BulkActionBar({ selectedCount, onClear, onBulkDelete, onBulkStatusUpdate, can }: any) {
+function BulkActionBar({ selectedCount, onClear, onBulkDelete, onBulkStatusUpdate, onBulkApplyDiscount, onBulkEdit, onBulkArchive, onBulkRestore, showArchived, can }: any) {
+  const [discountValue, setDiscountValue] = useState('0');
+
   return (
     <motion.div 
       initial={{ y: 100, x: '-50%', opacity: 0 }}
       animate={{ y: 0, x: '-50%', opacity: 1 }}
       exit={{ y: 100, x: '-50%', opacity: 0 }}
-      className="fixed bottom-10 left-1/2 z-[100] bg-slate-900 shadow-2xl text-white px-6 py-4 rounded-3xl flex items-center gap-6 border border-slate-700/50 backdrop-blur-md"
+      className="fixed bottom-10 left-1/2 z-[100] bg-slate-900 shadow-2xl text-white px-6 py-4 rounded-3xl flex items-center gap-6 border border-slate-700/50 backdrop-blur-md max-w-[95vw] overflow-x-auto scrollbar-none"
     >
-      <div className="flex items-center gap-3 pr-6 border-r border-slate-700">
+      <div className="flex items-center gap-3 pr-6 border-r border-slate-700 shrink-0">
         <div className="bg-blue-600 text-white w-8 h-8 rounded-full flex items-center justify-center font-black text-xs shadow-lg shadow-blue-500/20">{selectedCount}</div>
         <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Selected</span>
       </div>
       
       {can('edit') && (
-        <div className="flex items-center gap-2">
-          <button 
-            onClick={() => onBulkStatusUpdate('UPI')}
-            className="px-4 py-2 hover:bg-slate-800 rounded-xl transition-all text-[10px] font-black uppercase tracking-widest flex items-center gap-2"
-          >
-            <CreditCard size={14} className="text-indigo-400" /> Mark UPI
-          </button>
-          <button 
-            onClick={() => onBulkStatusUpdate('Cash')}
-            className="px-4 py-2 hover:bg-slate-800 rounded-xl transition-all text-[10px] font-black uppercase tracking-widest flex items-center gap-2"
-          >
-            <span className="w-3.5 h-3.5 flex items-center justify-center text-emerald-400 font-bold">₹</span> Mark Cash
-          </button>
-          <button 
-            onClick={() => onBulkStatusUpdate('Pending')}
-            className="px-4 py-2 hover:bg-slate-800 rounded-xl transition-all text-[10px] font-black uppercase tracking-widest flex items-center gap-2"
-          >
-            <History size={14} className="text-amber-400" /> Mark Pending
-          </button>
-        </div>
+        <>
+          <div className="flex items-center gap-1 shrink-0">
+            <button 
+              onClick={() => onBulkStatusUpdate('UPI')}
+              className="px-3 py-2 hover:bg-slate-800 rounded-xl transition-all text-[9px] font-black uppercase tracking-widest flex items-center gap-2"
+              title="Mark as UPI"
+            >
+              <CreditCard size={14} className="text-indigo-400" /> <span className="hidden lg:inline">Mark UPI</span>
+            </button>
+            <button 
+              onClick={() => onBulkStatusUpdate('Cash')}
+              className="px-3 py-2 hover:bg-slate-800 rounded-xl transition-all text-[9px] font-black uppercase tracking-widest flex items-center gap-2"
+              title="Mark as Cash"
+            >
+              <span className="w-3.5 h-3.5 flex items-center justify-center text-emerald-400 font-bold">₹</span> <span className="hidden lg:inline">Mark Cash</span>
+            </button>
+            <button 
+              onClick={() => onBulkStatusUpdate('Pending')}
+              className="px-3 py-2 hover:bg-slate-800 rounded-xl transition-all text-[9px] font-black uppercase tracking-widest flex items-center gap-2"
+              title="Mark as Pending"
+            >
+              <History size={14} className="text-amber-400" /> <span className="hidden lg:inline">Mark Pending</span>
+            </button>
+          </div>
+
+          <div className="h-8 w-px bg-slate-700 mx-1 shrink-0" />
+
+          <div className="flex items-center gap-2 shrink-0">
+             <button 
+              onClick={onBulkEdit}
+              className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-[9px] font-black uppercase tracking-widest transition-all flex items-center gap-2 border border-slate-700"
+             >
+                <Edit3 size={14} className="text-blue-400" /> Bulk Edit
+             </button>
+
+             {showArchived ? (
+               <button 
+                onClick={onBulkRestore}
+                className="px-3 py-2 bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-400 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all flex items-center gap-2 border border-indigo-500/30"
+               >
+                  <ArchiveRestore size={14} /> Restore
+               </button>
+             ) : (
+               <button 
+                onClick={onBulkArchive}
+                className="px-3 py-2 bg-amber-600/20 hover:bg-amber-600/30 text-amber-400 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all flex items-center gap-2 border border-amber-500/30"
+               >
+                  <Archive size={14} /> Archive
+               </button>
+             )}
+          </div>
+
+          <div className="h-8 w-px bg-slate-700 mx-1 shrink-0" />
+
+          <div className="flex items-center gap-3 shrink-0">
+             <div className="relative">
+                <input 
+                  type="number" 
+                  value={discountValue}
+                  onChange={(e) => setDiscountValue(e.target.value)}
+                  className="w-12 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-[9px] font-black focus:ring-1 focus:ring-blue-500 outline-none text-center"
+                  placeholder="0"
+                />
+                <span className="absolute right-1 top-1/2 -translate-y-1/2 text-[7px] font-black text-slate-500">%</span>
+             </div>
+             <button 
+              onClick={() => onBulkApplyDiscount(Number(discountValue))}
+              className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all flex items-center gap-2"
+             >
+                <Tag size={12} /> Discount
+             </button>
+          </div>
+        </>
       )}
 
-      <div className="flex items-center gap-2 pl-6 border-l border-slate-700">
+      <div className="flex items-center gap-2 pl-6 border-l border-slate-700 shrink-0">
         {can('delete') && (
           <button 
             onClick={onBulkDelete}
-            className="p-2 text-red-400 hover:bg-red-500/10 rounded-xl transition-all"
-            title="Delete selected"
+            className="p-2.5 bg-red-600/10 hover:bg-red-600 text-red-500 hover:text-white rounded-xl transition-all group"
+            title="Delete Selected"
           >
-            <Trash2 size={18} />
+            <Trash2 size={16} />
           </button>
         )}
         <button 
           onClick={onClear}
-          className="p-2 text-slate-400 hover:bg-slate-800 rounded-xl transition-all"
-          title="Clear selection"
+          className="p-2.5 bg-slate-800 hover:bg-white hover:text-slate-900 rounded-xl transition-all"
+          title="Clear Selection"
         >
-          <X size={18} />
+          <X size={16} />
         </button>
       </div>
     </motion.div>
@@ -5667,6 +6646,62 @@ function ItemMultiSelect({ options, selected, onChange }: { options: string[], s
   );
 }
 
+function UnifiedSkeletonLoader() {
+  return (
+    <div className="space-y-6 md:space-y-10 animate-pulse w-full">
+      {/* Cards Shimmer */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mt-8">
+        {[1, 2, 3, 4].map((i) => (
+          <div key={i} className="bg-white p-6 rounded-2xl border border-slate-100 space-y-3">
+            <div className="flex justify-between items-center">
+              <div className="w-8 h-8 bg-slate-200 rounded-lg" />
+              <div className="w-16 h-3 bg-slate-200 rounded-lg" />
+            </div>
+            <div className="w-24 h-8 bg-slate-200 rounded-lg" />
+            <div className="w-32 h-3 bg-slate-200 rounded-lg" />
+          </div>
+        ))}
+      </div>
+
+      {/* Grid Content Shimmer */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="bg-white p-6 rounded-3xl border border-slate-100 h-80 flex flex-col justify-between">
+          <div className="space-y-2">
+            <div className="w-40 h-4 bg-slate-200 rounded-lg" />
+            <div className="w-24 h-3 bg-slate-200 rounded-lg" />
+          </div>
+          <div className="w-full h-40 bg-slate-100 rounded-2xl flex items-end p-4 gap-2">
+            {[30, 60, 45, 90, 50, 75, 100, 40].map((h, i) => (
+              <div key={i} style={{ height: `${h}%` }} className="flex-1 bg-slate-200/80 rounded-t-md" />
+            ))}
+          </div>
+        </div>
+
+        <div className="bg-white p-6 rounded-3xl border border-slate-100 h-80 flex flex-col justify-between">
+          <div className="space-y-2">
+            <div className="w-32 h-4 bg-slate-200 rounded-lg" />
+            <div className="w-20 h-3 bg-slate-200 rounded-lg" />
+          </div>
+          <div className="space-y-3 flex-1 mt-6">
+            {[1, 2, 3].map((i) => (
+              <div key={i} className="flex justify-between items-center py-2 border-b border-slate-50">
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 bg-slate-200 rounded-full" />
+                  <div className="space-y-1.5">
+                    <div className="w-28 h-3.5 bg-slate-200 rounded-lg" />
+                    <div className="w-16 h-2.5 bg-slate-200 rounded-lg" />
+                  </div>
+                </div>
+                <div className="w-12 h-6 bg-slate-200 rounded-lg" />
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SortHeader({ label, sortKey, currentSort, onSort, className = "", ...props }: any) {
   const isActive = currentSort.key === sortKey;
   return (
@@ -5712,6 +6747,13 @@ function LedgerSection({
   setSelectedRecordIds,
   bulkDeleteRecords,
   bulkUpdateStatus,
+  bulkApplyDiscount,
+  bulkArchiveRecords,
+  bulkUpdateRecords,
+  showArchived,
+  setShowArchived,
+  showBulkEditModal,
+  setShowBulkEditModal,
   customFields, 
   grandTotal, 
   pricing,
@@ -5720,17 +6762,61 @@ function LedgerSection({
   setMsg,
   onSort,
   sortConfig,
-  downloadTemplate,
-  itemOrder
+  downloadTemplate
 }: any) {
   const [editingCell, setEditingCell] = useState<{ id: string, field: string } | null>(null);
   const [quickAdd, setQuickAdd] = useState({ name: '', studentClass: CLASSES[0], notes: '' });
   const [footerQuickEntry, setFooterQuickEntry] = useState({ name: '', studentClass: CLASSES[0], totalAmount: '' });
   const [showMobileFilters, setShowMobileFilters] = useState(false);
+  const [showImportGuideModal, setShowImportGuideModal ] = useState(false);
+  const [showLedgerSearchOverlay, setShowLedgerSearchOverlay] = useState(false);
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const itemNames = itemOrder && itemOrder.length > 0 ? itemOrder : Object.keys(pricing);
-
+  const itemNames = Object.keys(pricing);
   const [showQuickForm, setShowQuickForm] = useState(false);
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [bulkDiscount, setBulkDiscount] = useState('0');
+  const [exportSettings, setExportSettings] = useState<any>({
+    format: 'xlsx',
+    fields: {
+      srNo: true,
+      date: true,
+      name: true,
+      studentClass: true,
+      notes: true,
+      items: true,
+      totalQty: true,
+      totalAmount: true,
+      discountPercent: true,
+      paymentMode: true,
+      paidAmount: true,
+      balanceDue: true,
+      paymentDate: true,
+    }
+  });
+
+  // Initialize custom fields in export settings when they change
+  useEffect(() => {
+    setExportSettings((prev: any) => {
+      const newFields = { ...prev.fields };
+      customFields.forEach((f: any) => {
+        if (newFields[f.id] === undefined) {
+          newFields[f.id] = true;
+        }
+      });
+      return { ...prev, fields: newFields };
+    });
+  }, [customFields]);
+
+  // Duplicate Records Detection
+  const duplicateMap = useMemo(() => {
+    const counts = new Map<string, number>();
+    allRecords.forEach((r: any) => {
+      const key = `${r.srNo}|${(r.name || "").trim().toLowerCase()}`;
+      counts.set(key, (counts.get(key) || 0) + 1);
+    });
+    return counts;
+  }, [allRecords]);
   const [fullQuickAdd, setFullQuickAdd] = useState({
     date: new Date().toISOString().split('T')[0],
     name: '',
@@ -5782,6 +6868,15 @@ function LedgerSection({
               </button>
             )}
 
+            <button 
+              onClick={() => onSort('duplicates')}
+              className={`flex-1 sm:flex-none px-4 py-2.5 rounded-xl text-xs font-black uppercase transition-all flex items-center justify-center gap-2 border ${sortConfig.key === 'duplicates' ? 'bg-red-600 text-white border-red-600 shadow-xl ring-2 ring-red-100' : 'bg-red-50 text-red-600 border-red-100 hover:bg-red-100 shadow-lg shadow-red-500/5'}`}
+            >
+              <AlertCircle size={14} /> 
+              <span className="hidden sm:inline">Check Duplicates</span>
+              <span className="sm:hidden">DUP</span>
+            </button>
+
             <div className="relative group/export flex-1 sm:flex-none z-30">
               <button className="w-full bg-emerald-50 text-emerald-700 px-4 py-2.5 rounded-xl text-xs font-black uppercase hover:bg-emerald-100 transition-all font-mono flex items-center justify-center gap-2 border border-emerald-100">
                 <FileDown size={14} /> <span className="hidden sm:inline">EXPORT</span><span className="sm:hidden">EX</span>
@@ -5790,8 +6885,11 @@ function LedgerSection({
                 <button onClick={() => exportLedger('xlsx')} className="w-full text-left px-4 py-4 text-xs font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-2 border-b border-slate-50">
                   <FileSpreadsheet size={16} className="text-emerald-500" /> Excel (.xlsx)
                 </button>
-                <button onClick={() => exportLedger('csv')} className="w-full text-left px-4 py-4 text-xs font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-2">
+                <button onClick={() => exportLedger('csv')} className="w-full text-left px-4 py-4 text-xs font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-2 border-b border-slate-50">
                   <FileSpreadsheet size={16} className="text-blue-500" /> CSV (.csv)
+                </button>
+                <button onClick={() => setShowExportModal(true)} className="w-full text-left px-4 py-4 text-xs font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-2">
+                  <Settings size={16} className="text-slate-500" /> Custom Export...
                 </button>
               </div>
             </div>
@@ -5804,7 +6902,7 @@ function LedgerSection({
               onChange={importLedger} 
             />
             <button 
-              onClick={() => fileInputRef.current?.click()}
+              onClick={() => setShowImportGuideModal(true)}
               className="flex-1 sm:flex-none bg-indigo-50 text-indigo-700 px-4 py-2.5 rounded-xl text-xs font-black uppercase hover:bg-indigo-100 transition-all font-mono flex items-center justify-center gap-2 border border-indigo-100"
             >
               <Upload size={14} /> <span className="hidden sm:inline">IMPORT</span><span className="sm:hidden">IM</span>
@@ -5817,9 +6915,32 @@ function LedgerSection({
               <FileSpreadsheet size={14} className="text-emerald-400" /> <span className="hidden sm:inline">TEMPLATE</span><span className="sm:hidden">TMP</span>
             </button>
 
-            <button onClick={handlePrint} disabled={allRecords.length === 0} className="flex-1 sm:flex-none bg-blue-50 text-blue-600 px-4 py-2.5 rounded-xl text-xs font-black uppercase hover:bg-blue-100 transition-all font-mono flex items-center justify-center gap-2 border border-blue-100">
-              <Printer size={14} /> <span className="hidden sm:inline">PRINT</span><span className="sm:hidden">PDF</span>
-            </button>
+            <div className="relative group/print flex-1 sm:flex-none z-30">
+              <button disabled={records.length === 0} className="w-full bg-blue-50 text-blue-600 px-4 py-2.5 rounded-xl text-xs font-black uppercase hover:bg-blue-100 transition-all font-mono flex items-center justify-center gap-2 border border-blue-100 disabled:opacity-50">
+                <Printer size={14} /> <span className="hidden sm:inline">PRINT</span><span className="sm:hidden">PR</span> <ChevronDown size={10} />
+              </button>
+              <div className="absolute right-0 top-full mt-2 w-48 bg-white border border-slate-200 rounded-xl shadow-xl opacity-0 invisible group-hover/print:opacity-100 group-hover/print:visible transition-all z-50 overflow-hidden">
+                <button 
+                  onClick={() => handlePrint()} 
+                  className="w-full text-left px-4 py-4 text-[10px] font-black uppercase hover:bg-blue-50 transition-colors flex flex-col gap-1 border-b border-slate-50"
+                >
+                  <div className="flex items-center gap-2">
+                    <Printer size={14} className="text-blue-500" /> Print Filtered
+                  </div>
+                  <span className="text-[8px] text-slate-400 font-bold ml-6">Total {records.length} records</span>
+                </button>
+                <button 
+                  onClick={() => handlePrint(selectedRecordIds)} 
+                  disabled={selectedRecordIds.length === 0}
+                  className="w-full text-left px-4 py-4 text-[10px] font-black uppercase hover:bg-blue-50 transition-colors flex flex-col gap-1 disabled:opacity-50 disabled:grayscale"
+                >
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 size={14} className="text-emerald-500" /> Print Selected
+                  </div>
+                  <span className="text-[8px] text-slate-400 font-bold ml-6">{selectedRecordIds.length} records selected</span>
+                </button>
+              </div>
+            </div>
           </div>
         </div>
         
@@ -5890,13 +7011,20 @@ function LedgerSection({
                   {/* Basic Info */}
                   <div className="space-y-4">
                     <div className="space-y-1.5">
-                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Student Name</label>
+                      <div className="flex items-center justify-between px-1">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Student Name</label>
+                        {fullQuickAdd.name && allRecords.some((r: any) => r.name.trim().toLowerCase() === fullQuickAdd.name.trim().toLowerCase()) && (
+                          <span className="text-[8px] font-black text-amber-600 animate-pulse flex items-center gap-1 uppercase tracking-widest">
+                            <AlertCircle size={10} /> Name Exists
+                          </span>
+                        )}
+                      </div>
                       <div className="relative">
                         <UserCircle className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
                         <input 
                           type="text"
                           placeholder="EX: VISHAL D."
-                          className="w-full h-11 pl-10 pr-4 bg-white border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-bold transition-all shadow-sm"
+                          className={`w-full h-11 pl-10 pr-4 bg-white border rounded-xl outline-none focus:border-blue-500 text-xs font-bold transition-all shadow-sm ${fullQuickAdd.name && allRecords.some((r: any) => r.name.trim().toLowerCase() === fullQuickAdd.name.trim().toLowerCase()) ? 'border-amber-300' : 'border-slate-200'}`}
                           value={fullQuickAdd.name}
                           onChange={(e) => setFullQuickAdd(p => ({ ...p, name: e.target.value.toUpperCase() }))}
                         />
@@ -6127,7 +7255,7 @@ function LedgerSection({
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
                 <input 
                   type="text" 
-                  placeholder="Quick Search..." 
+                  placeholder="Search student or item name..." 
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   className="w-full h-10 pl-9 pr-4 bg-white border border-slate-200 rounded-xl outline-none text-xs font-bold focus:border-blue-500 transition-all shadow-sm"
@@ -6147,7 +7275,7 @@ function LedgerSection({
               <Search className="absolute left-3 top-7 text-slate-400" size={14} />
               <input 
                 type="text" 
-                placeholder="Student Name..." 
+                placeholder="Student, item, or class..." 
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="w-full h-9 pl-9 pr-4 bg-white border border-slate-200 rounded-xl outline-none text-xs font-bold focus:border-blue-500 transition-all shadow-sm"
@@ -6216,6 +7344,17 @@ function LedgerSection({
                 {CLASSES.map(c => <option key={c} value={c}>{c}</option>)}
               </select>
               <ChevronDown className="absolute right-3 top-7 text-slate-300 pointer-events-none" size={12} />
+            </div>
+
+            <div className="relative lg:col-span-2">
+              <label className="text-xs font-black uppercase text-slate-400 mb-1 block px-1">Visibility</label>
+              <button 
+                onClick={() => setShowArchived(!showArchived)}
+                className={`w-full h-9 px-4 rounded-xl text-[10px] font-black uppercase transition-all flex items-center justify-center gap-2 border ${showArchived ? 'bg-indigo-600 text-white border-indigo-600 shadow-lg' : 'bg-slate-50 text-slate-600 border-slate-100'}`}
+              >
+                {showArchived ? <ArchiveRestore size={14} /> : <Archive size={14} />}
+                {showArchived ? 'Showing Archived' : 'Show Archives'}
+              </button>
             </div>
           </div>
 
@@ -6348,6 +7487,332 @@ function LedgerSection({
         </button>
       </div>
 
+      <AnimatePresence>
+        {showExportModal && (
+          <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="bg-white w-full max-w-2xl rounded-[2.5rem] shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[90vh]"
+            >
+              <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+                <div className="flex items-center gap-4">
+                  <div className="p-3 bg-emerald-100 text-emerald-600 rounded-2xl shadow-sm">
+                    <FileDown size={24} />
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-black text-slate-900 uppercase tracking-tight">Custom Export Options</h3>
+                    <p className="text-slate-500 text-[10px] font-bold uppercase tracking-widest mt-0.5">Select format and fields for your report</p>
+                  </div>
+                </div>
+                <button onClick={() => setShowExportModal(false)} className="p-3 hover:bg-white rounded-2xl text-slate-400 hover:text-slate-600 transition-all border border-transparent hover:border-slate-200">
+                  <X size={20} />
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-8 space-y-8 custom-scroll">
+                {/* Format Selection */}
+                <div className="grid grid-cols-2 gap-4">
+                  <button 
+                    onClick={() => setExportSettings({ ...exportSettings, format: 'xlsx' })}
+                    className={`p-6 rounded-[2rem] border-2 transition-all flex flex-col items-center gap-3 ${exportSettings.format === 'xlsx' ? 'border-emerald-500 bg-emerald-50' : 'border-slate-100 bg-white hover:border-slate-200'}`}
+                  >
+                    <div className={`p-4 rounded-2xl ${exportSettings.format === 'xlsx' ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-200' : 'bg-slate-100 text-slate-400'}`}>
+                      <FileSpreadsheet size={32} />
+                    </div>
+                    <div className="text-center">
+                      <span className="block text-sm font-black text-slate-900">Excel (.xlsx)</span>
+                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Recommended for deep analysis</span>
+                    </div>
+                  </button>
+
+                  <button 
+                    onClick={() => setExportSettings({ ...exportSettings, format: 'csv' })}
+                    className={`p-6 rounded-[2rem] border-2 transition-all flex flex-col items-center gap-3 ${exportSettings.format === 'csv' ? 'border-blue-500 bg-blue-50' : 'border-slate-100 bg-white hover:border-slate-200'}`}
+                  >
+                    <div className={`p-4 rounded-2xl ${exportSettings.format === 'csv' ? 'bg-blue-500 text-white shadow-lg shadow-blue-200' : 'bg-slate-100 text-slate-400'}`}>
+                      <FileSpreadsheet size={32} />
+                    </div>
+                    <div className="text-center">
+                      <span className="block text-sm font-black text-slate-900">CSV (.csv)</span>
+                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Universal plaintext format</span>
+                    </div>
+                  </button>
+                </div>
+
+                {/* Field Selection */}
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">Select Fields to Include</h4>
+                    <button 
+                      onClick={() => {
+                        const allTrue = Object.values(exportSettings.fields).every(v => v === true);
+                        const newFields = { ...exportSettings.fields };
+                        Object.keys(newFields).forEach(k => newFields[k] = !allTrue);
+                        setExportSettings({ ...exportSettings, fields: newFields });
+                      }}
+                      className="text-[10px] font-black text-blue-600 uppercase tracking-widest hover:underline"
+                    >
+                      {Object.values(exportSettings.fields).every(v => v === true) ? 'Unselect All' : 'Select All'}
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
+                    {[
+                      { id: 'srNo', label: 'Sr. No.' },
+                      { id: 'date', label: 'Date' },
+                      { id: 'name', label: 'Student Name' },
+                      { id: 'studentClass', label: 'Class' },
+                      { id: 'notes', label: 'General Notes' },
+                      { id: 'items', label: 'Detailed Item Breakdown' },
+                      { id: 'totalQty', label: 'Total Qty' },
+                      { id: 'totalAmount', label: 'Total Amount' },
+                      { id: 'discountPercent', label: 'Discount %' },
+                      { id: 'paymentMode', label: 'Payment Mode' },
+                      { id: 'paidAmount', label: 'Paid Amount' },
+                      { id: 'balanceDue', label: 'Balance Due' },
+                      { id: 'paymentDate', label: 'Payment Date' },
+                    ].map(field => (
+                      <label 
+                        key={field.id}
+                        className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition-all ${exportSettings.fields[field.id] ? 'bg-blue-50 border-blue-200 text-blue-700' : 'bg-white border-slate-100 text-slate-400 hover:border-slate-200'}`}
+                      >
+                        <input 
+                          type="checkbox"
+                          className="hidden"
+                          checked={exportSettings.fields[field.id]}
+                          onChange={() => setExportSettings({
+                            ...exportSettings,
+                            fields: { ...exportSettings.fields, [field.id]: !exportSettings.fields[field.id] }
+                          })}
+                        />
+                        {exportSettings.fields[field.id] ? <CheckSquare size={16} /> : <Square size={16} />}
+                        <span className="text-[10px] font-black uppercase tracking-tight">{field.label}</span>
+                      </label>
+                    ))}
+                  </div>
+
+                  {customFields.length > 0 && (
+                    <div className="space-y-3 pt-4 border-t border-slate-100">
+                      <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">Custom Database Fields</h4>
+                      <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
+                        {customFields.map((field: any) => (
+                          <label 
+                            key={field.id}
+                            className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition-all ${exportSettings.fields[field.id] ? 'bg-indigo-50 border-indigo-200 text-indigo-700' : 'bg-white border-slate-100 text-slate-400 hover:border-slate-200'}`}
+                          >
+                            <input 
+                              type="checkbox"
+                              className="hidden"
+                              checked={exportSettings.fields[field.id]}
+                              onChange={() => setExportSettings({
+                                ...exportSettings,
+                                fields: { ...exportSettings.fields, [field.id]: !exportSettings.fields[field.id] }
+                              })}
+                            />
+                            {exportSettings.fields[field.id] ? <CheckSquare size={16} /> : <Square size={16} />}
+                            <span className="text-[10px] font-black uppercase tracking-tight">{field.label}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="p-8 bg-slate-50 border-t border-slate-100 flex items-center gap-4">
+                <button 
+                  onClick={() => setShowExportModal(false)}
+                  className="flex-1 py-4 bg-white border border-slate-200 text-slate-600 rounded-2xl font-black text-xs uppercase tracking-[0.2em] hover:bg-slate-50 transition-all"
+                >
+                  Cancel
+                </button>
+                <button 
+                  onClick={() => {
+                    exportLedger(exportSettings.format, exportSettings.fields);
+                    setShowExportModal(false);
+                  }}
+                  className={`flex-[2] py-4 rounded-2xl font-black text-xs uppercase tracking-[0.2em] transition-all shadow-xl flex items-center justify-center gap-2 ${exportSettings.format === 'xlsx' ? 'bg-emerald-600 text-white hover:bg-emerald-700 shadow-emerald-500/20' : 'bg-blue-600 text-white hover:bg-blue-700 shadow-blue-500/20'}`}
+                >
+                  <Download size={16} />
+                  Download {exportSettings.format.toUpperCase()} Report
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {showImportGuideModal && (
+          <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="bg-white w-full max-w-3xl rounded-[2.5rem] shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[90vh]"
+            >
+              {/* Modal Header */}
+              <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+                <div className="flex items-center gap-4">
+                  <div className="p-3 bg-indigo-100 text-indigo-600 rounded-2xl shadow-sm">
+                    <FileSpreadsheet size={24} />
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-black text-slate-900 uppercase tracking-tight">Excel / CSV Import Assistant</h3>
+                    <p className="text-slate-500 text-[10px] font-bold uppercase tracking-widest mt-0.5">Spreadsheet verification guidelines & sample structure</p>
+                  </div>
+                </div>
+                <button onClick={() => { setShowImportGuideModal(false); setIsDraggingOver(false); }} className="p-3 hover:bg-white rounded-2xl text-slate-400 hover:text-slate-600 transition-all border border-transparent hover:border-slate-200">
+                  <X size={20} />
+                </button>
+              </div>
+
+              {/* Modal Body */}
+              <div className="flex-1 overflow-y-auto p-8 space-y-6 custom-scroll">
+                {/* Guidelines Panel */}
+                <div className="bg-indigo-50/50 border border-indigo-100/50 rounded-2xl p-5 space-y-3">
+                  <h4 className="text-[10px] font-black text-indigo-700 uppercase tracking-widest flex items-center gap-2">
+                    <Info size={14} /> Import Rules & Format Specifications
+                  </h4>
+                  <ul className="text-xs text-slate-600 space-y-2 list-disc list-inside leading-relaxed font-semibold">
+                    <li>Required column headers are <strong className="text-slate-800 underline">Student Name</strong> and <strong className="text-slate-800 underline">Total Amount</strong>.</li>
+                    <li>Row dates should match DD/MM/YYYY or standard YYYY-MM-DD.</li>
+                    <li>Class names should match your existing setups (e.g. Nursery, LKG, Class 1 etc).</li>
+                    <li>Items can be configured dynamically as: <code className="bg-indigo-100/60 px-1 py-0.5 rounded text-[10px] text-indigo-800 font-bold">&lt;ItemName&gt;_Size</code>, <code className="bg-indigo-100/60 px-1 py-0.5 rounded text-[10px] text-indigo-800 font-bold">&lt;ItemName&gt;_Qty</code> and <code className="bg-indigo-100/60 px-1 py-0.5 rounded text-[10px] text-indigo-800 font-bold">&lt;ItemName&gt;_Price</code>.</li>
+                  </ul>
+                </div>
+
+                {/* Expected Columns Chart */}
+                <div className="space-y-3">
+                  <div className="flex justify-between items-center">
+                    <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">Sample Headers & expected value formats</h4>
+                  </div>
+                  <div className="overflow-x-auto border border-slate-100 rounded-2xl bg-slate-50/30">
+                    <table className="w-full text-left text-xs text-slate-500 font-bold border-collapse">
+                      <thead>
+                        <tr className="border-b border-slate-100 bg-slate-100/30 text-[10px] text-slate-400 font-black uppercase tracking-wider">
+                          <th className="p-3">Header Name</th>
+                          <th className="p-3">Required</th>
+                          <th className="p-3">Sample Data</th>
+                          <th className="p-3">Description</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        <tr>
+                          <td className="p-3 font-mono text-slate-900">Student Name</td>
+                          <td className="p-3"><span className="text-red-500 bg-red-50 px-1.5 py-0.5 rounded text-[9px] font-black uppercase">Yes</span></td>
+                          <td className="p-3 text-slate-600">John Doe</td>
+                          <td className="p-3 text-[11px] text-slate-400">FullName of student</td>
+                        </tr>
+                        <tr>
+                          <td className="p-3 font-mono text-slate-950">Total Amount</td>
+                          <td className="p-3"><span className="text-red-500 bg-red-50 px-1.5 py-0.5 rounded text-[9px] font-black uppercase">Yes</span></td>
+                          <td className="p-3 text-slate-600">850</td>
+                          <td className="p-3 text-[11px] text-slate-400">Total sale amount (numeric value)</td>
+                        </tr>
+                        <tr>
+                          <td className="p-3 font-mono text-slate-900">Class</td>
+                          <td className="p-3"><span className="text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded text-[9px] font-black uppercase">Optional</span></td>
+                          <td className="p-3 text-slate-600">Class 1</td>
+                          <td className="p-3 text-[11px] text-slate-400">Defaults to {CLASSES[0]} if omitted</td>
+                        </tr>
+                        <tr>
+                          <td className="p-3 font-mono text-slate-900">Date</td>
+                          <td className="p-3"><span className="text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded text-[9px] font-black uppercase">Optional</span></td>
+                          <td className="p-3 text-slate-600">19/05/2026</td>
+                          <td className="p-3 text-[11px] text-slate-400">Defaults to today's date if empty</td>
+                        </tr>
+                        <tr>
+                          <td className="p-3 font-mono text-slate-900">Payment Mode</td>
+                          <td className="p-3"><span className="text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded text-[9px] font-black uppercase">Optional</span></td>
+                          <td className="p-3 text-slate-600">UPI, Cash, or Pending</td>
+                          <td className="p-3 text-[11px] text-slate-400">Default mode of payment is "Pending"</td>
+                        </tr>
+                        {itemNames.slice(0, 2).map((itemName: string) => (
+                          <React.Fragment key={itemName}>
+                            <tr>
+                              <td className="p-3 font-mono text-indigo-600">{itemName}_Qty</td>
+                              <td className="p-3"><span className="text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded text-[9px] font-black uppercase">Optional</span></td>
+                              <td className="p-3 text-slate-600 font-semibold text-slate-600">1</td>
+                              <td className="p-3 text-[11px] text-indigo-400">Item quantity for sale</td>
+                            </tr>
+                            <tr>
+                              <td className="p-3 font-mono text-indigo-600">{itemName}_Size</td>
+                              <td className="p-3"><span className="text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded text-[9px] font-black uppercase">Optional</span></td>
+                              <td className="p-3 text-slate-600 font-semibold text-slate-600">S</td>
+                              <td className="p-3 text-[11px] text-indigo-400">Item size value</td>
+                            </tr>
+                          </React.Fragment>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* Drag-and-Drop Area */}
+                <div className="space-y-2">
+                  <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">Select / Drop Import Document</h4>
+                  <div 
+                    onDragOver={(e) => { e.preventDefault(); setIsDraggingOver(true); }}
+                    onDragLeave={() => setIsDraggingOver(false)}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      setIsDraggingOver(false);
+                      const file = e.dataTransfer.files?.[0];
+                      if (file) {
+                        importLedger(file);
+                        setShowImportGuideModal(false);
+                      }
+                    }}
+                    onClick={() => {
+                      const input = document.createElement('input');
+                      input.type = 'file';
+                      input.accept = '.xlsx,.xls,.csv';
+                      input.onchange = (e: any) => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                          importLedger(file);
+                          setShowImportGuideModal(false);
+                        }
+                      };
+                      input.click();
+                    }}
+                    className={`h-40 border-2 border-dashed rounded-[2rem] transition-all duration-300 flex flex-col items-center justify-center p-6 text-center cursor-pointer ${isDraggingOver ? 'border-indigo-600 bg-indigo-50/70 scale-95 shadow-lg' : 'border-slate-200 bg-slate-50 hover:bg-slate-100/50 hover:border-indigo-300'}`}
+                  >
+                    <div className={`p-3 rounded-2xl mb-3 shadow-md transition-transform ${isDraggingOver ? 'bg-indigo-600 text-white scale-110' : 'bg-white text-slate-400 group-hover:scale-105'}`}>
+                      <Upload size={24} />
+                    </div>
+                    <span className="block text-xs font-black text-slate-800 uppercase tracking-wide">
+                      {isDraggingOver ? "Drop file to upload instantly!" : "Drag & Drop File Here, or click to browse"}
+                    </span>
+                    <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mt-1">Supports Excel (.xlsx) & CSV (.csv) formats</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Modal Footer / Download Template focus */}
+              <div className="p-8 bg-slate-50 border-t border-slate-100 flex items-center justify-between gap-4">
+                <button 
+                  onClick={() => { setShowImportGuideModal(false); setIsDraggingOver(false); }}
+                  className="flex-1 py-4 bg-white border border-slate-200 text-slate-600 rounded-2xl font-black text-xs uppercase tracking-[0.2em] hover:bg-slate-50 transition-all text-center"
+                >
+                  Close
+                </button>
+                <button 
+                  onClick={() => {
+                    downloadTemplate();
+                  }}
+                  className="flex-[2] py-4 rounded-2xl font-black text-xs uppercase tracking-[0.2em] bg-indigo-600 text-white hover:bg-indigo-700 transition-all shadow-xl shadow-indigo-500/10 flex items-center justify-center gap-2"
+                >
+                  <FileSpreadsheet size={16} className="text-emerald-300" />
+                  Download Excel Template
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       <div className="flex-1 overflow-x-auto custom-scroll print:overflow-visible pb-24">
         {/* Mobile Card View */}
         <div className="md:hidden space-y-4 p-4 pb-20">
@@ -6357,27 +7822,33 @@ function LedgerSection({
               <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">No records to display</p>
             </div>
           ) : (
-            records.map((record: any) => (
-              <div 
-                key={record.id} 
-                className={`bg-white rounded-2xl border transition-all active:scale-[0.98] ${
-                  selectedRecordIds.includes(record.id) 
-                    ? 'border-blue-500 shadow-lg shadow-blue-100 ring-2 ring-blue-50' 
-                    : record.paymentMode === 'Pending' 
-                      ? 'border-amber-200 bg-amber-50/30' 
-                      : record.paymentMode === 'UPI' 
-                        ? 'border-blue-100 bg-blue-50/20' 
-                        : 'border-emerald-100 bg-emerald-50/20'
-                } p-5`}
-                onClick={() => toggleSelectRecord(record.id)}
-              >
-                <div className="flex justify-between items-start mb-4">
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-xl bg-slate-100 flex items-center justify-center text-[10px] font-black text-slate-500 border border-slate-200">
-                      {record.srNo}
-                    </div>
+            records.map((record: any) => {
+              const isDuplicate = duplicateMap.get(`${record.srNo}|${(record.name || "").trim().toLowerCase()}`)! > 1;
+              return (
+                <div 
+                  key={record.id} 
+                  className={`mobile-record-card bg-white rounded-2xl border ${
+                    isDuplicate 
+                      ? 'border-red-400 shadow-lg shadow-red-100 ring-4 ring-red-50' 
+                      : selectedRecordIds.includes(record.id) 
+                        ? 'border-blue-500 shadow-lg shadow-blue-100 ring-2 ring-blue-50 printable-row' 
+                        : 'border-slate-100 shadow-sm'
+                  } p-5 transition-all active:scale-[0.98] print:block print:w-full print:mb-4`}
+                  onClick={() => toggleSelectRecord(record.id)}
+                >
+                  <div className="flex justify-between items-start mb-4">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-8 h-8 rounded-xl flex items-center justify-center text-[10px] font-black border relative ${isDuplicate ? 'bg-red-100 text-red-600 border-red-200 shadow-inner' : 'bg-slate-100 text-slate-500 border-slate-200'}`}>
+                        {record.srNo}
+                        {isDuplicate && (
+                          <span className="absolute -top-1.5 -right-1.5 bg-red-600 text-white text-[7px] px-1 rounded-full border border-white animate-bounce shadow-sm">!</span>
+                        )}
+                      </div>
                     <div>
-                      <h4 className="text-sm font-black text-slate-900 line-clamp-1">{record.name}</h4>
+                      <div className="flex items-center gap-1.5">
+                        <h4 className="text-sm font-black text-slate-900 line-clamp-1">{record.name}</h4>
+                        {isDuplicate && <span className="text-[7px] font-black bg-red-100 text-red-600 px-1.5 py-0.5 rounded border border-red-200 uppercase tracking-widest">DUPLICATE</span>}
+                      </div>
                       <p className="text-[9px] font-bold text-slate-400 uppercase">{record.studentClass} • {record.date}</p>
                     </div>
                   </div>
@@ -6414,6 +7885,15 @@ function LedgerSection({
                   <div className="flex gap-2 shrink-0">
                     {can('edit') && (
                       <button 
+                        onClick={(e) => { e.stopPropagation(); bulkArchiveRecords([record.id], !record.isArchived); }}
+                        className={`p-3 rounded-xl transition-all shadow-sm ${record.isArchived ? 'bg-indigo-600 text-white' : 'bg-indigo-50 text-indigo-600 hover:bg-indigo-600 hover:text-white'}`}
+                        title={record.isArchived ? "Restore record" : "Archive record"}
+                      >
+                        {record.isArchived ? <ArchiveRestore size={16} /> : <Archive size={16} />}
+                      </button>
+                    )}
+                    {can('edit') && (
+                      <button 
                         onClick={(e) => { e.stopPropagation(); setEditingRecord(record); }}
                         className="p-3 bg-blue-50 text-blue-600 rounded-xl hover:bg-blue-600 hover:text-white transition-all shadow-sm"
                       >
@@ -6431,7 +7911,8 @@ function LedgerSection({
                   </div>
                 </div>
               </div>
-            ))
+            );
+          })
           )}
         </div>
 
@@ -6560,13 +8041,20 @@ function LedgerSection({
                 <td className="px-4 py-3 border-r border-slate-50 bg-blue-50/30 font-mono text-[10px] text-slate-400 italic">Auto</td>
                 <td className="px-6 py-3 border-r-[2px] border-slate-100">
                   <div className="space-y-1">
-                    <input 
-                      type="text"
-                      placeholder="Quick Add Name..."
-                      className="w-full px-2 py-1 text-xs border border-slate-200 rounded outline-none focus:border-blue-400 bg-white"
-                      value={quickAdd.name}
-                      onChange={(e) => setQuickAdd(p => ({ ...p, name: e.target.value }))}
-                    />
+                    <div className="flex items-center justify-between">
+                      <input 
+                        type="text"
+                        placeholder="Quick Add Name..."
+                        className={`w-full px-2 py-1 text-xs border rounded outline-none bg-white font-bold uppercase ${quickAdd.name && allRecords.some((r: any) => r.name.trim().toLowerCase() === quickAdd.name.trim().toLowerCase()) ? 'border-amber-300 text-amber-900 focus:border-amber-400' : 'border-slate-200 focus:border-blue-400'}`}
+                        value={quickAdd.name}
+                        onChange={(e) => setQuickAdd(p => ({ ...p, name: e.target.value.toUpperCase() }))}
+                      />
+                    </div>
+                    {quickAdd.name && allRecords.some((r: any) => r.name.trim().toLowerCase() === quickAdd.name.trim().toLowerCase()) && (
+                      <div className="text-[7px] font-black text-amber-600 animate-pulse flex items-center gap-1 uppercase tracking-widest bg-amber-50 px-1 rounded border border-amber-100">
+                        <AlertCircle size={8} /> Potential Duplicate Name
+                      </div>
+                    )}
                     <div className="flex gap-2">
                       <select
                         className="text-[9px] px-1 py-0.5 border border-slate-200 rounded outline-none bg-white font-bold"
@@ -6625,20 +8113,32 @@ function LedgerSection({
               </tr>
             )}
 
-            {records.map((rec: any, index: number) => (
-              <tr 
-                key={rec.id} 
-                className={`transition-colors text-xs print:hover:bg-transparent group/row ${
-                  selectedRecordIds.includes(rec.id) 
-                    ? 'bg-blue-100/50' 
-                    : rec.paymentMode === 'Pending'
-                      ? 'bg-amber-50/50 hover:bg-amber-100/50'
-                      : rec.paymentMode === 'UPI'
-                        ? 'bg-blue-50/30 hover:bg-blue-100/30'
-                        : 'bg-emerald-50/30 hover:bg-emerald-100/30'
-                }`}
-              >
-                <td className="sticky left-0 z-10 bg-inherit px-4 py-4 font-mono font-bold text-slate-400 border-r border-slate-100 print:text-black shadow-[2px_0_5px_rgba(0,0,0,0.02)] transition-colors">#{rec.srNo}</td>
+            {records.map((rec: any, index: number) => {
+              const isDuplicate = duplicateMap.get(`${rec.srNo}|${(rec.name || "").trim().toLowerCase()}`)! > 1;
+              return (
+                <tr 
+                  key={rec.id} 
+                  className={`transition-colors text-xs print:hover:bg-transparent group/row ${
+                    isDuplicate 
+                      ? 'bg-red-50/80 hover:bg-red-100/90 shadow-inner' 
+                      : selectedRecordIds.includes(rec.id) 
+                        ? 'bg-blue-50/50 printable-row'
+                        : index % 2 === 0 
+                          ? 'bg-white hover:bg-slate-50' 
+                          : 'bg-slate-50/40 hover:bg-slate-100/60'
+                  }`}
+                >
+                  <td className={`sticky left-0 z-10 bg-inherit px-4 py-4 font-mono font-bold border-r border-slate-100 print:text-black shadow-[2px_0_5px_rgba(0,0,0,0.02)] transition-colors ${isDuplicate ? 'text-red-600' : 'text-slate-400'}`}>
+                    <div className="flex items-center gap-2">
+                       #{rec.srNo}
+                       {isDuplicate && (
+                         <div className="flex flex-col gap-0.5">
+                           <AlertCircle size={10} className="text-red-500 animate-pulse shrink-0" />
+                           <span className="text-[7px] font-black bg-red-600 text-white px-1 rounded animate-pulse">DUP</span>
+                         </div>
+                       )}
+                    </div>
+                  </td>
                 <td className="bg-inherit px-4 py-4 border-r border-slate-50 print:hidden text-center transition-colors">
                   {(can('delete') || can('edit')) && (
                     <input 
@@ -6881,6 +8381,15 @@ function LedgerSection({
                   <div className="flex items-center justify-center gap-1">
                     {can('edit') && (
                       <button 
+                        onClick={() => bulkArchiveRecords([rec.id], !rec.isArchived)} 
+                        title={rec.isArchived ? "Restore record" : "Archive record"}
+                        className={`p-2 rounded-xl transition-all opacity-0 group-hover/row:opacity-100 focus:opacity-100 ${rec.isArchived ? 'text-indigo-600 bg-indigo-50 opacity-100' : 'text-slate-300 hover:text-indigo-600 hover:bg-indigo-50'}`}
+                      >
+                        {rec.isArchived ? <ArchiveRestore size={16} /> : <Archive size={16} />}
+                      </button>
+                    )}
+                    {can('edit') && (
+                      <button 
                         onClick={() => setEditingRecord(rec)} 
                         title="Edit record"
                         className="text-slate-300 hover:text-blue-600 p-2 rounded-xl hover:bg-blue-50 transition-all opacity-0 group-hover/row:opacity-100 focus:opacity-100"
@@ -6900,7 +8409,8 @@ function LedgerSection({
                   </div>
                 </td>
               </tr>
-            ))}
+            );
+          })}
           </tbody>
         </table>
       </div>
@@ -7000,15 +8510,111 @@ function LedgerSection({
 
       <AnimatePresence>
         {selectedRecordIds.length > 0 && (
-          <BulkActionBar 
-            selectedCount={selectedRecordIds.length}
-            onClear={() => setSelectedRecordIds([])}
-            onBulkDelete={() => bulkDeleteRecords(selectedRecordIds)}
-            onBulkStatusUpdate={(mode: PaymentMode) => bulkUpdateStatus(selectedRecordIds, mode)}
-            can={can}
-          />
+          <>
+            <BulkEditModal 
+              isOpen={showBulkEditModal} 
+              onClose={() => setShowBulkEditModal(false)} 
+              onConfirm={(updates: any) => bulkUpdateRecords(selectedRecordIds, updates)}
+              customFields={customFields}
+            />
+
+            <BulkActionBar 
+              selectedCount={selectedRecordIds.length}
+              onClear={() => setSelectedRecordIds([])}
+              onBulkDelete={() => bulkDeleteRecords(selectedRecordIds)}
+              onBulkStatusUpdate={(mode: PaymentMode) => bulkUpdateStatus(selectedRecordIds, mode)}
+              onBulkApplyDiscount={(val: number) => bulkApplyDiscount(selectedRecordIds, val)}
+              onBulkEdit={() => setShowBulkEditModal(true)}
+              onBulkArchive={() => bulkArchiveRecords(selectedRecordIds, true)}
+              onBulkRestore={() => bulkArchiveRecords(selectedRecordIds, false)}
+              showArchived={showArchived}
+              can={can}
+            />
+          </>
         )}
       </AnimatePresence>
+
+      {/* Floating Modern Search Icon Overlay */}
+      <div className="fixed bottom-24 right-6 sm:bottom-12 sm:right-12 z-[110] flex flex-col items-end gap-3 print:hidden">
+        <AnimatePresence>
+          {showLedgerSearchOverlay && (
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 15 }}
+              transition={{ duration: 0.2 }}
+              className="bg-slate-950/95 border border-slate-800 backdrop-blur-md rounded-2xl shadow-2xl p-4 flex flex-col gap-3 w-72 sm:w-96 text-left text-slate-100"
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-black uppercase text-slate-400 tracking-widest flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-ping" />
+                  Live Ledger Search
+                </span>
+                {searchQuery && (
+                  <button 
+                    onClick={() => setSearchQuery('')}
+                    className="text-[9px] font-black bg-slate-800 text-slate-400 py-1 px-2 rounded-lg hover:bg-slate-700 active:scale-95 uppercase tracking-wider transition-all"
+                  >
+                    Clear Filter
+                  </button>
+                )}
+              </div>
+              
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                <input 
+                  autoFocus
+                  type="text" 
+                  placeholder="Search student, items, or class..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full h-11 pl-9 pr-8 bg-slate-900 border border-slate-800 rounded-xl outline-none text-xs font-bold text-white placeholder-slate-500 focus:border-blue-500 transition-all shadow-inner"
+                />
+                {searchQuery && (
+                  <button 
+                    onClick={() => setSearchQuery('')}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                  >
+                    <X size={14} />
+                  </button>
+                )}
+              </div>
+
+              <div className="flex items-center justify-between text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">
+                <span>Matched: {records.length} records</span>
+                {searchQuery ? (
+                  <span className="text-blue-400 font-extrabold animate-pulse">Filtering On</span>
+                ) : (
+                  <span className="text-slate-500">Idle</span>
+                )}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <button
+          onClick={() => setShowLedgerSearchOverlay(!showLedgerSearchOverlay)}
+          title="Toggle search portal"
+          className={`relative w-14 h-14 rounded-full text-white shadow-2xl flex items-center justify-center hover:scale-110 active:scale-95 transition-all outline-none border cursor-pointer group ${
+            showLedgerSearchOverlay 
+              ? 'bg-red-600 border-red-500 hover:bg-red-700' 
+              : searchQuery
+                ? 'bg-blue-600 border-blue-500 hover:bg-blue-700 font-extrabold'
+                : 'bg-slate-900 border-slate-700 hover:bg-slate-800'
+          }`}
+        >
+          {showLedgerSearchOverlay ? (
+            <X size={20} className="text-white transition-transform duration-300" />
+          ) : (
+            <Search size={22} className="text-white transition-transform duration-300 group-hover:scale-115" />
+          )}
+          {searchQuery && !showLedgerSearchOverlay && (
+            <span className="absolute -top-1 -right-1 w-5 h-5 bg-blue-500 text-white rounded-full border-2 border-white flex items-center justify-center text-[10px] font-black font-sans shadow-lg animate-bounce">
+              !
+            </span>
+          )}
+        </button>
+      </div>
     </div>
   );
 }
@@ -7037,6 +8643,173 @@ function ConfirmDialog({ isOpen, title, message, onConfirm, onCancel, type = 'da
               {isLoading ? 'Processing...' : 'Confirm'}
             </button>
           </div>
+        </div>
+      </motion.div>
+    </div>
+  );
+}
+
+function BulkEditModal({ isOpen, onClose, onConfirm, customFields }: any) {
+  const [updates, setUpdates] = useState<any>({});
+  const [enabledFields, setEnabledFields] = useState<Record<string, boolean>>({});
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+      <motion.div 
+        initial={{ scale: 0.95, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        className="bg-white rounded-[2.5rem] shadow-2xl max-w-2xl w-full overflow-hidden font-sans flex flex-col max-h-[90vh]"
+      >
+        <div className="p-8 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
+           <div className="flex items-center gap-4">
+              <div className="p-3 bg-blue-100 text-blue-600 rounded-2xl">
+                 <Edit3 size={24} />
+              </div>
+              <div>
+                 <h3 className="text-xl font-black text-slate-900 uppercase tracking-tight">Bulk Edit Records</h3>
+                 <p className="text-slate-500 text-[10px] font-bold uppercase tracking-widest mt-0.5">Select fields to update for all selected records</p>
+              </div>
+           </div>
+           <button onClick={onClose} className="p-2 hover:bg-white rounded-xl text-slate-400 hover:text-slate-600">
+             <X size={20} />
+           </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-8 space-y-6 custom-scroll text-slate-900">
+           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {/* Payment Mode */}
+              <div className="space-y-2">
+                 <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" checked={!!enabledFields.paymentMode} onChange={() => setEnabledFields(prev => ({ ...prev, paymentMode: !prev.paymentMode }))} className="rounded border-slate-300" />
+                    <span className="text-[10px] font-black uppercase text-slate-500">Payment Mode</span>
+                 </label>
+                 <select 
+                   disabled={!enabledFields.paymentMode}
+                   value={updates.paymentMode || 'Pending'}
+                   onChange={(e) => setUpdates({ ...updates, paymentMode: e.target.value })}
+                   className="w-full h-12 px-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none text-xs font-bold focus:border-blue-500 disabled:opacity-30 disabled:grayscale transition-all text-slate-900"
+                 >
+                    <option value="Pending">Pending</option>
+                    <option value="UPI">UPI</option>
+                    <option value="Cash">Cash</option>
+                 </select>
+              </div>
+
+              {/* Class */}
+              <div className="space-y-2">
+                 <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" checked={!!enabledFields.studentClass} onChange={() => setEnabledFields(prev => ({ ...prev, studentClass: !prev.studentClass }))} className="rounded border-slate-300" />
+                    <span className="text-[10px] font-black uppercase text-slate-500">Class</span>
+                 </label>
+                 <select 
+                   disabled={!enabledFields.studentClass}
+                   value={updates.studentClass || CLASSES[0]}
+                   onChange={(e) => setUpdates({ ...updates, studentClass: e.target.value })}
+                   className="w-full h-12 px-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none text-xs font-bold focus:border-blue-500 disabled:opacity-30 disabled:grayscale transition-all text-slate-900"
+                 >
+                    {CLASSES.map(c => <option key={c} value={c}>{c}</option>)}
+                 </select>
+              </div>
+
+              {/* Date */}
+              <div className="space-y-2">
+                 <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" checked={!!enabledFields.date} onChange={() => setEnabledFields(prev => ({ ...prev, date: !prev.date }))} className="rounded border-slate-300" />
+                    <span className="text-[10px] font-black uppercase text-slate-500">Transaction Date</span>
+                 </label>
+                 <input 
+                   type="date"
+                   disabled={!enabledFields.date}
+                   value={updates.date || ''}
+                   onChange={(e) => setUpdates({ ...updates, date: e.target.value })}
+                   className="w-full h-12 px-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none text-xs font-bold focus:border-blue-500 disabled:opacity-30 disabled:grayscale transition-all text-slate-900"
+                 />
+              </div>
+
+              {/* Discount */}
+              <div className="space-y-2">
+                 <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" checked={!!enabledFields.discountPercent} onChange={() => setEnabledFields(prev => ({ ...prev, discountPercent: !prev.discountPercent }))} className="rounded border-slate-300" />
+                    <span className="text-[10px] font-black uppercase text-slate-500">Discount %</span>
+                 </label>
+                 <input 
+                   type="number"
+                   disabled={!enabledFields.discountPercent}
+                   value={updates.discountPercent || ''}
+                   onChange={(e) => setUpdates({ ...updates, discountPercent: e.target.value })}
+                   className="w-full h-12 px-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none text-xs font-bold focus:border-blue-500 disabled:opacity-30 disabled:grayscale transition-all text-slate-900"
+                   placeholder="0"
+                 />
+              </div>
+           </div>
+
+           {/* Custom Fields */}
+           {customFields.length > 0 && (
+             <div className="pt-6 border-t border-slate-100 space-y-4">
+               <h4 className="text-[10px] font-black uppercase tracking-widest text-slate-400">Custom Database Fields</h4>
+               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                 {customFields.map((f: any) => (
+                   <div key={f.id} className="space-y-2">
+                     <label className="flex items-center gap-2 cursor-pointer">
+                        <input type="checkbox" checked={!!enabledFields[f.id]} onChange={() => setEnabledFields(prev => ({ ...prev, [f.id]: !prev[f.id] }))} className="rounded border-slate-300" />
+                        <span className="text-[10px] font-black uppercase text-slate-500">{f.label}</span>
+                     </label>
+                     {f.type === 'select' ? (
+                       <select 
+                         disabled={!enabledFields[f.id]}
+                         value={updates.customData?.[f.id] || ''}
+                         onChange={(e) => setUpdates({ ...updates, customData: { ...updates.customData, [f.id]: e.target.value } })}
+                         className="w-full h-12 px-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none text-xs font-bold focus:border-blue-500 disabled:opacity-30 disabled:grayscale transition-all text-slate-900"
+                       >
+                         <option value="">Select...</option>
+                         {f.options?.map((opt: string) => <option key={opt} value={opt}>{opt}</option>)}
+                       </select>
+                     ) : (
+                       <input 
+                         type={f.type}
+                         disabled={!enabledFields[f.id]}
+                         value={updates.customData?.[f.id] || ''}
+                         onChange={(e) => setUpdates({ ...updates, customData: { ...updates.customData, [f.id]: e.target.value } })}
+                         className="w-full h-12 px-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none text-xs font-bold focus:border-blue-500 disabled:opacity-30 disabled:grayscale transition-all text-slate-900"
+                       />
+                     )}
+                   </div>
+                 ))}
+               </div>
+             </div>
+           )}
+
+           <div className="pt-6 border-t border-slate-100 italic text-[9px] text-slate-400 text-center font-bold">
+             * Total Amounts and Balance Dues will be automatically recalculated if Discount is updated.
+           </div>
+        </div>
+
+        <div className="p-8 bg-slate-50 border-t border-slate-100 flex gap-4">
+           <button onClick={onClose} className="flex-1 py-4 bg-white border border-slate-200 text-slate-600 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-50 shadow-sm">Cancel</button>
+           <button 
+             onClick={() => {
+                const finalUpdates: any = {};
+                Object.keys(enabledFields).forEach(key => {
+                   if (enabledFields[key]) {
+                      if (['paymentMode', 'studentClass', 'date', 'discountPercent'].includes(key)) {
+                         finalUpdates[key] = updates[key];
+                      } else {
+                         // Custom field
+                         if (!finalUpdates.customData) finalUpdates.customData = {};
+                         finalUpdates.customData[key] = updates.customData[key];
+                      }
+                   }
+                });
+                onConfirm(finalUpdates);
+                onClose();
+             }}
+             disabled={Object.values(enabledFields).every(v => v === false)}
+             className="flex-[2] py-4 bg-blue-600 text-white rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-blue-700 disabled:opacity-30 shadow-xl shadow-blue-500/20"
+           >
+             Apply Updates
+           </button>
         </div>
       </motion.div>
     </div>

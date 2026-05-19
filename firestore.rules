@@ -42,23 +42,20 @@ service cloud.firestore {
       ]);
     }
 
-    function getUserData(userId) {
-      return get(/databases/$(database)/documents/users/$(userId)).data;
-    }
-
-    function hasRole(role) {
-      return isSignedIn() && (
+    function isAdmin() {
+      return isWhitelistedAdmin() || (
+        isSignedIn() && 
         exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-        getUserData(request.auth.uid).role == role
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Admin'
       );
     }
 
-    function isAdmin() {
-      return isWhitelistedAdmin() || hasRole('Admin');
-    }
-
     function isEditor() {
-      return hasRole('Editor') || hasRole('Admin');
+      return isAdmin() || (
+        isSignedIn() && 
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Editor'
+      );
     }
 
     function isOwner(userId) {
@@ -115,7 +112,7 @@ service cloud.firestore {
 
     // Collection: Users
     match /users/{userId} {
-      allow read: if isOwner(userId) || isAdmin();
+      allow read: if isOwner(userId) || isWhitelistedAdmin() || isAdmin();
       allow create: if isOwner(userId);
       allow update: if isOwner(userId) || isAdmin();
       allow delete: if isAdmin() && userId != request.auth.uid;

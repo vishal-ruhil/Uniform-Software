@@ -4,6 +4,8 @@ export interface User {
   id: string;
   email: string;
   name: string;
+  username?: string;
+  phone?: string;
   password?: string;
   role: UserRole;
   createdAt: string;
@@ -44,6 +46,7 @@ export interface SaleRecord {
   // Transaction-level notes and custom data (optional, depends on if they are shared)
   notes?: string;
   customData?: Record<string, any>;
+  isArchived?: boolean;
 }
 
 export interface CartItem {
