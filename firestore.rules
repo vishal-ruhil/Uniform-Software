@@ -112,24 +112,26 @@ service cloud.firestore {
 
     // Collection: Users
     match /users/{userId} {
-      allow read: if isOwner(userId) || isWhitelistedAdmin() || isAdmin();
+      allow read: if isOwner(userId) || isAdmin();
       allow create: if isOwner(userId);
       allow update: if isOwner(userId) || isAdmin();
       allow delete: if isAdmin() && userId != request.auth.uid;
 
       // User-specific Pricing
       match /pricing/{docId} {
-        allow read, write: if isOwner(userId);
+        allow read, write: if isOwner(userId) || isAdmin();
       }
 
       // User-specific Sales
       match /sales/{saleId} {
-        allow read, write: if isOwner(userId);
+        allow read: if isSignedIn();
+        allow create: if (isEditor() || isAdmin()) && request.auth.token.email_verified == true && isValidSale(incoming());
+        allow update, delete: if isEditor() || isAdmin();
       }
 
       // User-specific Settings
       match /settings/{settingId} {
-        allow read, write: if isOwner(userId);
+        allow read, write: if isOwner(userId) || isAdmin();
       }
     }
 

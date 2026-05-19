@@ -1493,11 +1493,13 @@ export default function App() {
     }
 
     try {
-      // Add to Firestore
-      await addDoc(collection(db, 'users', user.id, 'sales'), newRecord);
+      const docRef = doc(collection(db, 'users', user.id, 'sales'));
+      newRecord.id = docRef.id;
+
+      const batch = writeBatch(db);
+      batch.set(docRef, newRecord);
       
       // Update Stock in Firestore via transaction or batch
-      const batch = writeBatch(db);
       const nextPricing = { ...pricing };
       cart.forEach(item => {
         if (nextPricing[item.item] && nextPricing[item.item][item.size]) {
@@ -1536,6 +1538,44 @@ export default function App() {
     }
   };
 
+  const addRecord = async (newRecord: SaleRecord) => {
+    if (!user) return;
+    try {
+      const docRef = doc(collection(db, 'users', user.id, 'sales'));
+      newRecord.id = docRef.id;
+
+      const batch = writeBatch(db);
+      batch.set(docRef, newRecord);
+
+      const nextPricing = { ...pricing };
+      let stockChanged = false;
+      if (newRecord.items && newRecord.items.length > 0) {
+        newRecord.items.forEach(item => {
+          if (nextPricing[item.item] && nextPricing[item.item][item.size]) {
+            stockChanged = true;
+            const currentStock = nextPricing[item.item][item.size].stock || 0;
+            nextPricing[item.item][item.size] = {
+              ...nextPricing[item.item][item.size],
+              stock: Math.max(0, currentStock - item.qty)
+            };
+          }
+        });
+      }
+
+      if (stockChanged) {
+        batch.set(doc(db, 'users', user.id, 'pricing', 'current'), { 
+          data: nextPricing,
+          order: itemOrder 
+        });
+      }
+
+      await batch.commit();
+      performSheetSync('create', newRecord.id, newRecord);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `users/${user.id}/sales`);
+    }
+  };
+
   const deleteRecord = (id: string) => {
     const rec = records.find(r => r.id === id);
     setConfirmState({
@@ -1559,7 +1599,10 @@ export default function App() {
                 };
               }
             });
-            batch.set(doc(db, 'users', user.id, 'pricing', 'current'), { data: nextPricing });
+            batch.set(doc(db, 'users', user.id, 'pricing', 'current'), { 
+              data: nextPricing, 
+              order: itemOrder
+            });
           }
           
           await batch.commit();
@@ -1604,7 +1647,10 @@ export default function App() {
           }
         });
         
-        batch.set(doc(db, 'users', user.id, 'pricing', 'current'), { data: nextPricing });
+        batch.set(doc(db, 'users', user.id, 'pricing', 'current'), { 
+          data: nextPricing, 
+          order: itemOrder
+        });
       }
       
       batch.update(doc(db, 'users', user.id, 'sales', id), updates);
@@ -1653,7 +1699,10 @@ export default function App() {
           });
 
           if (stockChanged) {
-            batch.set(doc(db, 'users', user.id, 'pricing', 'current'), { data: nextPricing });
+            batch.set(doc(db, 'users', user.id, 'pricing', 'current'), { 
+              data: nextPricing, 
+              order: itemOrder
+            });
           }
 
           await Promise.all([batch.commit(), ...syncPromises]);
@@ -2029,6 +2078,24 @@ export default function App() {
           validRecords.push(newRecord);
         });
 
+        // Deduct Stock from Pricing during Import
+        const nextPricing = { ...pricing };
+        let stockChanged = false;
+        validRecords.forEach(rec => {
+          if (rec.items && rec.items.length > 0) {
+            rec.items.forEach(item => {
+              if (nextPricing[item.item] && nextPricing[item.item][item.size]) {
+                stockChanged = true;
+                const currentStock = nextPricing[item.item][item.size].stock || 0;
+                nextPricing[item.item][item.size] = {
+                  ...nextPricing[item.item][item.size],
+                  stock: Math.max(0, currentStock - item.qty)
+                };
+              }
+            });
+          }
+        });
+
         // Batch commit valid records
         const batchSize = 400;
         for (let i = 0; i < validRecords.length; i += batchSize) {
@@ -2040,6 +2107,13 @@ export default function App() {
             batch.set(docRef, rec);
           });
           await batch.commit();
+        }
+
+        if (stockChanged) {
+          await setDoc(doc(db, 'users', user.id, 'pricing', 'current'), {
+            data: nextPricing,
+            order: itemOrder
+          });
         }
 
         if (errors.length > 0) {
@@ -3439,7 +3513,7 @@ export default function App() {
                 deleteRecord={deleteRecord}
                 setEditingRecord={setEditingRecord}
                 updateRecord={updateRecord}
-                addRecord={(r: any) => setRecords((prev: any) => [r, ...prev])}
+                addRecord={addRecord}
                 selectedRecordIds={selectedRecordIds}
                 setSelectedRecordIds={setSelectedRecordIds}
                 bulkDeleteRecords={bulkDeleteRecords}
@@ -4858,6 +4932,7 @@ function ReportsSection({
 }
 
 function EditRecordModal({ record, onClose, onUpdate, pricing, customFields }: any) {
+  const [srNo, setSrNo] = useState<number>(record.srNo);
   const [studentName, setStudentName] = useState(record.name);
   const [studentClass, setStudentClass] = useState(record.studentClass);
   const [transactionDate, setTransactionDate] = useState(() => {
@@ -4901,6 +4976,7 @@ function EditRecordModal({ record, onClose, onUpdate, pricing, customFields }: a
     
     const displayDate = new Date(transactionDate).toLocaleDateString('en-IN');
     const updates: any = {
+      srNo: Number(srNo) || record.srNo,
       name: studentName,
       studentClass,
       date: displayDate,
@@ -4936,14 +5012,18 @@ function EditRecordModal({ record, onClose, onUpdate, pricing, customFields }: a
             <div className="bg-blue-600 p-2 rounded-xl"><Pencil size={18} /></div>
             <div>
               <h3 className="font-black uppercase text-xs tracking-widest leading-none">Edit Record</h3>
-              <p className="text-[10px] text-slate-400 font-mono mt-1">SR NO #{record.srNo}</p>
+              <p className="text-[10px] text-slate-400 font-mono mt-1">SR NO #{srNo}</p>
             </div>
           </div>
           <button onClick={onClose} className="p-2 hover:bg-white/10 rounded-xl transition-all"><X size={20} /></button>
         </div>
 
         <div className="p-6 overflow-y-auto custom-scroll space-y-6">
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-3 gap-4">
+            <div className="space-y-1">
+              <label className="text-[10px] font-black text-slate-400 uppercase ml-1">Sr. No.</label>
+              <input type="number" value={srNo} onChange={e => setSrNo(Number(e.target.value))} className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl outline-none text-xs font-semibold" />
+            </div>
             <div className="space-y-1">
               <label className="text-[10px] font-black text-slate-400 uppercase ml-1">Date</label>
               <input type="date" value={transactionDate} onChange={e => setTransactionDate(e.target.value)} className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl outline-none text-xs font-medium" />
@@ -8130,13 +8210,45 @@ function LedgerSection({
                 >
                   <td className={`sticky left-0 z-10 bg-inherit px-4 py-4 font-mono font-bold border-r border-slate-100 print:text-black shadow-[2px_0_5px_rgba(0,0,0,0.02)] transition-colors ${isDuplicate ? 'text-red-600' : 'text-slate-400'}`}>
                     <div className="flex items-center gap-2">
-                       #{rec.srNo}
-                       {isDuplicate && (
-                         <div className="flex flex-col gap-0.5">
-                           <AlertCircle size={10} className="text-red-500 animate-pulse shrink-0" />
-                           <span className="text-[7px] font-black bg-red-600 text-white px-1 rounded animate-pulse">DUP</span>
-                         </div>
-                       )}
+                      {can('edit') && editingCell?.id === rec.id && editingCell?.field === 'srNo' ? (
+                        <input 
+                          autoFocus
+                          type="number"
+                          className="w-20 px-1 py-0.5 text-xs text-slate-800 border border-blue-500 rounded outline-none"
+                          defaultValue={rec.srNo}
+                          onBlur={(e) => {
+                            const val = Number(e.target.value);
+                            if (!isNaN(val) && val > 0) {
+                              updateRecord(rec.id, { srNo: val });
+                            }
+                            setEditingCell(null);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              const val = Number((e.target as HTMLInputElement).value);
+                              if (!isNaN(val) && val > 0) {
+                                updateRecord(rec.id, { srNo: val });
+                              }
+                              setEditingCell(null);
+                            } else if (e.key === 'Escape') {
+                              setEditingCell(null);
+                            }
+                          }}
+                        />
+                      ) : (
+                        <div 
+                          className={`flex items-center gap-1 leading-none rounded px-1 transition-colors ${can('edit') ? 'cursor-pointer hover:bg-blue-50/50 hover:text-blue-600' : ''}`}
+                          onClick={() => can('edit') && setEditingCell({ id: rec.id, field: 'srNo' })}
+                        >
+                          #{rec.srNo}
+                        </div>
+                      )}
+                      {isDuplicate && (
+                        <div className="flex flex-col gap-0.5">
+                          <AlertCircle size={10} className="text-red-500 animate-pulse shrink-0" />
+                          <span className="text-[7px] font-black bg-red-600 text-white px-1 rounded animate-pulse">DUP</span>
+                        </div>
+                      )}
                     </div>
                   </td>
                 <td className="bg-inherit px-4 py-4 border-r border-slate-50 print:hidden text-center transition-colors">
