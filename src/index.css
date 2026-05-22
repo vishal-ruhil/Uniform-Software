@@ -9,8 +9,8 @@
 @layer utilities {
   @media print {
     @page {
-      margin: 1cm;
-      size: landscape;
+      margin: 0.4cm !important;
+      size: A4 portrait;
     }
     
     body {

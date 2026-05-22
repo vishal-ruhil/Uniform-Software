@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { toPng, toJpeg } from 'html-to-image';
 import download from 'downloadjs';
+import { jsPDF } from 'jspdf';
 import { 
   FileSpreadsheet, 
   Settings, 
@@ -18,6 +19,7 @@ import {
   Hash,
   Smartphone,
   Plus,
+  Minus,
   X,
   Pencil,
   Sliders,
@@ -69,7 +71,13 @@ import {
   GripVertical,
   Archive,
   ArchiveRestore,
-  Edit3
+  Edit3,
+  FileText,
+  Bookmark,
+  Save,
+  Eye,
+  ZoomIn,
+  ZoomOut
 } from 'lucide-react';
 import { 
   AreaChart,
@@ -98,7 +106,10 @@ import {
   GoogleAuthProvider,
   signInWithPopup,
   sendEmailVerification,
-  sendPasswordResetEmail
+  sendPasswordResetEmail,
+  EmailAuthProvider,
+  reauthenticateWithCredential,
+  updatePassword
 } from 'firebase/auth';
 import { 
   getFirestore, 
@@ -246,7 +257,43 @@ export default function App() {
   const [pricing, setPricing] = useState<Pricing>(DEFAULT_PRICING);
   const [itemOrder, setItemOrder] = useState<string[]>([]);
   const [records, setRecords] = useState<SaleRecord[]>([]);
+  const [recordsToPrint, setRecordsToPrint] = useState<SaleRecord[]>([]);
+  const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
+  const [pdfProgress, setPdfProgress] = useState({ current: 0, total: 0 });
   const [customFields, setCustomFields] = useState<CustomField[]>([]);
+  const [recordsToPrintMode, setRecordsToPrintMode] = useState<'table' | 'cards' | 'invoice'>('invoice');
+  const [printFieldVisibility, setPrintFieldVisibility] = useState<Record<string, boolean>>({
+    storeHeader: true,
+    paymentDetails: true,
+    itemsBreakdown: true,
+    adminNotes: true,
+    customFields: true,
+    cashierSignature: true,
+    balancesOutstanding: true
+  });
+  const [presetSaveSuccess, setPresetSaveSuccess] = useState(false);
+
+  useEffect(() => {
+    const savedLayout = localStorage.getItem('uniform_pdf_layout_preset');
+    const savedFields = localStorage.getItem('uniform_pdf_fields_preset');
+    if (savedLayout) {
+      setRecordsToPrintMode(savedLayout as any);
+    }
+    if (savedFields) {
+      try {
+        setPrintFieldVisibility(JSON.parse(savedFields));
+      } catch (e) {
+        console.error("Failed to load PDF fields preset:", e);
+      }
+    }
+  }, []);
+
+  const [showLedgerSearchOverlay, setShowLedgerSearchOverlay] = useState(false);
+
+  const [showPDFOptionModal, setShowPDFOptionModal] = useState(false);
+  const [showPrintPreviewModal, setShowPrintPreviewModal] = useState(false);
+  const [pdfOptionSource, setPdfOptionSource] = useState<'filtered' | 'selected'>('filtered');
+  const [pdfSelectIds, setPdfSelectIds] = useState<string[] | undefined>(undefined);
 
   // --- Sync State ---
   const [isSyncing, setIsSyncing] = useState(false);
@@ -318,6 +365,54 @@ export default function App() {
   });
 
   const [customValues, setCustomValues] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Ctrl+N to open the 'New Sale' form
+      if (e.ctrlKey && e.key.toLowerCase() === 'n') {
+        e.preventDefault();
+        setActiveTab('sales');
+      }
+
+      // Ctrl+S to search the ledger
+      if (e.ctrlKey && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        if (activeTab !== 'ledger') {
+          setActiveTab('ledger');
+          setShowLedgerSearchOverlay(true);
+        } else {
+          setShowLedgerSearchOverlay(prev => !prev);
+        }
+      }
+
+      // Esc to close any active modal or overlay
+      if (e.key === 'Escape') {
+        if (showPDFOptionModal) setShowPDFOptionModal(false);
+        if (showPrintPreviewModal) setShowPrintPreviewModal(false);
+        if (editingRecord) setEditingRecord(null);
+        if (showConfirmation) setShowConfirmation(false);
+        if (showBulkEditModal) setShowBulkEditModal(false);
+        if (confirmState.isOpen) setConfirmState(prev => ({ ...prev, isOpen: false }));
+        if (isMobileMenuOpen) setIsMobileMenuOpen(false);
+        if (showLedgerSearchOverlay) setShowLedgerSearchOverlay(false);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [
+    activeTab, 
+    showPDFOptionModal, 
+    showPrintPreviewModal,
+    editingRecord, 
+    showConfirmation, 
+    showBulkEditModal, 
+    confirmState.isOpen, 
+    isMobileMenuOpen, 
+    showLedgerSearchOverlay
+  ]);
 
   // --- Effects ---
   useEffect(() => {
@@ -653,8 +748,14 @@ export default function App() {
     const paidAmount = activeRecords
       .filter(r => r.paymentMode !== 'Pending')
       .reduce((sum, r) => sum + (r.paidAmount || 0), 0);
+    const upiAmount = activeRecords
+      .filter(r => r.paymentMode === 'UPI')
+      .reduce((sum, r) => sum + (r.paidAmount || 0), 0);
+    const cashAmount = activeRecords
+      .filter(r => r.paymentMode === 'Cash')
+      .reduce((sum, r) => sum + (r.paidAmount || 0), 0);
     
-    return { totalSales, pendingAmount, paidAmount };
+    return { totalSales, pendingAmount, paidAmount, upiAmount, cashAmount };
   }, [records]);
 
   // Handlers
@@ -1467,7 +1568,7 @@ export default function App() {
     const timestamp = new Date().toISOString();
     const displayDate = new Date(transactionDate).toLocaleDateString('en-IN');
 
-    const finalSrNo = getNextSrNo();
+    const finalSrNo = Number(srNo) || getNextSrNo();
 
     const newRecord: SaleRecord = {
       id: crypto.randomUUID(),
@@ -1968,6 +2069,22 @@ export default function App() {
     });
 
     const worksheet = XLSX.utils.json_to_sheet(dataRows);
+    
+    // Auto-fit column widths to ensure a high-fidelity, polished Excel worksheet layout
+    if (dataRows.length > 0) {
+      const colWidths = Object.keys(dataRows[0]).map(key => {
+        let maxLen = key.toString().length;
+        dataRows.forEach((row: any) => {
+          const val = row[key];
+          if (val !== undefined && val !== null) {
+            maxLen = Math.max(maxLen, val.toString().length);
+          }
+        });
+        return { wch: Math.min(50, maxLen + 3) };
+      });
+      worksheet['!cols'] = colWidths;
+    }
+
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, "Ledger");
 
@@ -2172,31 +2289,123 @@ export default function App() {
   };
 
   const handlePrint = (ids?: string[]) => {
+    setPdfSelectIds(ids);
+    setPdfOptionSource(ids ? 'selected' : 'filtered');
+    // Default to 'invoice' format when printing an individual ledger record
+    if (ids && ids.length === 1) {
+      setRecordsToPrintMode('invoice');
+    }
+    setShowPDFOptionModal(true);
+  };
+
+  const handlePrintPreview = (ids?: string[]) => {
+    setPdfSelectIds(ids);
+    setPdfOptionSource(ids ? 'selected' : 'filtered');
+    // Default to 'invoice' format when previewing an individual ledger record
+    if (ids && ids.length === 1) {
+      setRecordsToPrintMode('invoice');
+    }
+    setShowPrintPreviewModal(true);
+  };
+
+  const handleDownloadPDF = (ids?: string[]) => {
+    setPdfSelectIds(ids);
+    setPdfOptionSource(ids ? 'selected' : 'filtered');
+    // Default to 'invoice' format when printing/downloading an individual ledger record
+    if (ids && ids.length === 1) {
+      setRecordsToPrintMode('invoice');
+    }
+    setShowPDFOptionModal(true);
+  };
+
+  const triggerPrint = (ids?: string[]) => {
     const originalTitle = document.title;
     const dateStr = new Date().toLocaleDateString().replace(/\//g, '-');
     document.title = ids ? `Selected_Uniform_Sales_${dateStr}` : `Filtered_Uniform_Sales_${dateStr}`;
     
-    // Create a temporary style to hide non-selected rows if ids are provided
-    let styleEl: HTMLStyleElement | null = null;
-    if (ids && ids.length > 0) {
-      styleEl = document.createElement('style');
-      styleEl.innerHTML = `
-        @media print {
-          tbody tr:not(.printable-row),
-          .mobile-record-card:not(.printable-row) { display: none !important; }
-        }
-      `;
-      document.head.appendChild(styleEl);
-    }
+    const recordsToUse = ids && ids.length > 0
+      ? records.filter(r => ids.includes(r.id))
+      : filteredRecords;
 
-    window.print();
+    setRecordsToPrint(recordsToUse);
 
     setTimeout(() => {
+      window.print();
       document.title = originalTitle;
-      if (styleEl) {
-        document.head.removeChild(styleEl);
+      setRecordsToPrint([]);
+    }, 400);
+  };
+
+  const triggerDownloadPDF = async (ids?: string[]) => {
+    const dateStr = new Date().toLocaleDateString().replace(/\//g, '-');
+    const displayModeName = recordsToPrintMode === 'invoice' ? 'Formal_Invoices' : (recordsToPrintMode === 'cards' ? 'Invoice_Cards' : 'Table_Ledger');
+    const filename = ids 
+      ? `Selected_Uniform_Sales_${displayModeName}_${dateStr}.pdf` 
+      : `Filtered_Uniform_Sales_${displayModeName}_${dateStr}.pdf`;
+
+    const recordsToUse = ids && ids.length > 0
+      ? records.filter(r => ids.includes(r.id))
+      : filteredRecords;
+
+    if (recordsToUse.length === 0) {
+      setMsg({ type: 'error', text: 'No records to export' });
+      return;
+    }
+
+    setRecordsToPrint(recordsToUse);
+    setIsGeneratingPDF(true);
+    const chunkSize = recordsToPrintMode === 'invoice' ? 1 : (recordsToPrintMode === 'cards' ? 4 : 15);
+    setPdfProgress({ current: 1, total: Math.ceil(recordsToUse.length / chunkSize) });
+
+    // Allow markup to render fully
+    await new Promise((resolve) => setTimeout(resolve, 600));
+
+    try {
+      const container = document.getElementById('pdf-render-root');
+      if (!container) {
+        throw new Error('Render root not found');
       }
-    }, 500);
+
+      const pages = container.getElementsByClassName('print-page');
+      if (pages.length === 0) {
+        throw new Error('No printable pages found');
+      }
+
+      const pdf = new jsPDF({
+        orientation: 'portrait',
+        unit: 'mm',
+        format: 'a4'
+      });
+
+      for (let i = 0; i < pages.length; i++) {
+        setPdfProgress({ current: i + 1, total: pages.length });
+        const pageEl = pages[i] as HTMLElement;
+
+        const dataUrl = await toPng(pageEl, {
+          backgroundColor: '#ffffff',
+          style: {
+            transform: 'scale(1)',
+          },
+          pixelRatio: 2,
+        });
+
+        if (i > 0) {
+          pdf.addPage();
+        }
+
+        pdf.addImage(dataUrl, 'PNG', 0, 0, 210, 297);
+      }
+
+      pdf.save(filename);
+      setMsg({ type: 'success', text: `PDF downloaded successfully: ${filename}` });
+    } catch (err: any) {
+      console.error(err);
+      setMsg({ type: 'error', text: 'Failed to generate PDF. Please try again.' });
+    } finally {
+      setIsGeneratingPDF(false);
+      setRecordsToPrint([]);
+      setPdfProgress({ current: 0, total: 0 });
+    }
   };
 
   return (
@@ -2286,7 +2495,7 @@ export default function App() {
       />
 
       {/* Dashboard Layout */}
-      <div className="flex h-screen bg-slate-50 overflow-hidden font-sans">
+      <div className="flex h-screen bg-slate-50 overflow-hidden font-sans print:hidden">
         {/* Mobile Drawer Overlay */}
         <AnimatePresence>
           {user && isMobileMenuOpen && (
@@ -2422,11 +2631,11 @@ export default function App() {
                 <button
                   key={tab.id}
                   onClick={() => setActiveTab(tab.id as any)}
-                  className={`w-full flex items-center gap-4 px-4 py-3.5 rounded-2xl transition-all relative group ${
+                  className={`w-full flex items-center gap-4 px-4 py-3.5 rounded-2xl transition-all relative group duration-250 ${
                     activeTab === tab.id 
-                      ? 'text-white font-black' 
-                      : 'text-slate-400 hover:text-white hover:bg-white/5'
-                  }`}
+                      ? 'text-white font-black shadow-lg shadow-blue-600/15' 
+                      : 'text-slate-400 hover:text-white hover:bg-slate-800/40 hover:shadow-inner'
+                  } ${!isSidebarCollapsed && activeTab !== tab.id ? 'hover:translate-x-1.5' : ''}`}
                 >
                   {activeTab === tab.id && (
                     <>
@@ -2437,14 +2646,19 @@ export default function App() {
                       />
                       <motion.div 
                         layoutId="sidebarActiveIndicator"
-                        className="absolute left-1 top-1/2 -translate-y-1/2 w-1 h-6 bg-white rounded-full shadow-md shadow-white/50"
+                        className="absolute left-1 top-1/2 -translate-y-1/2 w-1.5 h-6 bg-amber-400 rounded-full shadow-md shadow-amber-400/50"
                         transition={{ type: "spring", stiffness: 380, damping: 32 }}
                       />
                     </>
                   )}
-                  <tab.icon size={20} className={`relative z-10 flex-shrink-0 ${activeTab === tab.id ? 'text-white animate-pulse' : 'text-slate-500 group-hover:text-blue-300'} transition-colors`} />
+                  <tab.icon 
+                    size={20} 
+                    className={`relative z-10 flex-shrink-0 transition-transform duration-300 group-hover:scale-110 ${
+                      activeTab === tab.id ? 'text-white' : 'text-slate-500 group-hover:text-blue-400'
+                    }`} 
+                  />
                   {!isSidebarCollapsed && (
-                    <span className="relative z-10 text-xs uppercase tracking-[0.2em]">{tab.label}</span>
+                    <span className="relative z-10 text-xs uppercase tracking-[0.2em] transition-transform duration-300 group-hover:translate-x-0.5">{tab.label}</span>
                   )}
                   {isSidebarCollapsed && (
                     <div className="absolute left-16 bg-slate-900 border border-slate-700 px-3 py-2 rounded-lg text-xs font-black uppercase tracking-widest opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all whitespace-nowrap z-50 shadow-xl">
@@ -2533,7 +2747,7 @@ export default function App() {
 
           <div className="flex-1 overflow-y-auto custom-scroll bg-slate-50/50 relative">
             {/* Conditional Render Main Container Padding */}
-            <main className={`${user && !authLoading ? 'max-w-[1400px]' : ''} mx-auto w-full p-8 md:p-12 pb-32 md:pb-12 h-full flex flex-col`}>
+            <main className={`${user && !authLoading ? 'max-w-[1400px]' : ''} mx-auto w-full p-4 sm:p-6 md:p-8 lg:p-12 pb-24 md:pb-12 h-full flex flex-col`}>
                   {msg && (
                 <motion.div 
                   initial={{ opacity: 0, y: -20 }}
@@ -3050,38 +3264,77 @@ export default function App() {
                 </button>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-                   <div className="flex justify-between items-start mb-4">
-                      <div className="p-2 bg-blue-50 text-blue-600 rounded-lg"><TrendingUp size={20} /></div>
-                      <span className="text-xs font-black text-slate-400 uppercase tracking-widest">Total Revenue</span>
+              <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4 sm:gap-5">
+                {/* Total Revenue */}
+                <div className="bg-white p-4 sm:p-5 rounded-2xl shadow-sm border border-slate-200 hover:shadow-md transition-shadow flex flex-col justify-between">
+                   <div>
+                     <div className="flex justify-between items-start mb-3">
+                        <div className="p-1.5 bg-blue-50 text-blue-600 rounded-lg"><TrendingUp size={15} /></div>
+                        <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest text-right">Total Revenue</span>
+                     </div>
+                     <div className="text-base sm:text-lg md:text-xl font-black text-slate-900 font-mono truncate">₹{grandTotal}</div>
                    </div>
-                   <div className="text-3xl font-black text-slate-900 font-mono">₹{grandTotal}</div>
-                   <div className="text-xs text-slate-500 mt-1">Gross sales lifetime</div>
+                   <div className="text-[9px] text-slate-400 mt-2 font-semibold">Gross sales value</div>
                 </div>
-                <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-                   <div className="flex justify-between items-start mb-4">
-                      <div className="p-2 bg-emerald-50 text-emerald-600 rounded-lg"><History size={20} /></div>
-                      <span className="text-xs font-black text-slate-400 uppercase tracking-widest">Total Sales</span>
+
+                {/* Total Sales (Orders Count) */}
+                <div className="bg-white p-4 sm:p-5 rounded-2xl shadow-sm border border-slate-200 hover:shadow-md transition-shadow flex flex-col justify-between">
+                   <div>
+                     <div className="flex justify-between items-start mb-3">
+                        <div className="p-1.5 bg-violet-50 text-violet-600 rounded-lg"><History size={15} /></div>
+                        <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest text-right">Total Sales</span>
+                     </div>
+                     <div className="text-base sm:text-lg md:text-xl font-black text-slate-900 font-mono truncate">{stats.totalSales}</div>
                    </div>
-                   <div className="text-3xl font-black text-slate-900 font-mono">{stats.totalSales}</div>
-                   <div className="text-xs text-slate-500 mt-1">Confirmed transactions</div>
+                   <div className="text-[9px] text-slate-400 mt-2 font-semibold">Processed receipts</div>
                 </div>
-                <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-                   <div className="flex justify-between items-start mb-4">
-                      <div className="p-2 bg-amber-50 text-amber-600 rounded-lg"><CreditCard size={20} /></div>
-                      <span className="text-xs font-black text-slate-400 uppercase tracking-widest">Unpaid/Pending</span>
+
+                {/* Realized (Total Paid) */}
+                <div className="bg-white p-4 sm:p-5 rounded-2xl shadow-sm border border-slate-200 hover:shadow-md transition-shadow flex flex-col justify-between">
+                   <div>
+                     <div className="flex justify-between items-start mb-3">
+                        <div className="p-1.5 bg-emerald-50 text-emerald-600 rounded-lg"><CheckCircle2 size={15} /></div>
+                        <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest text-right">Realized Cash + UPI</span>
+                     </div>
+                     <div className="text-base sm:text-lg md:text-xl font-black text-emerald-700 font-mono truncate">₹{stats.paidAmount}</div>
                    </div>
-                   <div className="text-3xl font-black text-slate-900 font-mono">₹{stats.pendingAmount}</div>
-                   <div className="text-xs text-slate-500 mt-1 text-amber-600 font-medium">Pending collection</div>
+                   <div className="text-[9px] text-emerald-650 mt-2 font-extrabold uppercase tracking-tight">Total Collected</div>
                 </div>
-                <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-                   <div className="flex justify-between items-start mb-4">
-                      <div className="p-2 bg-indigo-50 text-indigo-600 rounded-lg"><Package size={20} /></div>
-                      <span className="text-xs font-black text-slate-400 uppercase tracking-widest">Realized Revenue</span>
+
+                {/* Total UPI Collected */}
+                <div className="bg-white p-4 sm:p-5 rounded-2xl shadow-sm border border-slate-200 hover:shadow-md transition-shadow flex flex-col justify-between">
+                   <div>
+                     <div className="flex justify-between items-start mb-3">
+                        <div className="p-1.5 bg-indigo-50 text-indigo-600 rounded-lg"><Smartphone size={15} /></div>
+                        <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest text-right">UPI Received</span>
+                     </div>
+                     <div className="text-base sm:text-lg md:text-xl font-black text-indigo-700 font-mono truncate">₹{stats.upiAmount}</div>
                    </div>
-                   <div className="text-3xl font-black text-slate-900 font-mono">₹{stats.paidAmount}</div>
-                   <div className="text-xs text-slate-500 mt-1 text-emerald-600 font-medium">Cash & UPI collected</div>
+                   <div className="text-[9px] text-indigo-500 mt-2 font-semibold">Instant digital pay</div>
+                </div>
+
+                {/* Total Cash Collected */}
+                <div className="bg-white p-4 sm:p-5 rounded-2xl shadow-sm border border-slate-200 hover:shadow-md transition-shadow flex flex-col justify-between">
+                   <div>
+                     <div className="flex justify-between items-start mb-3">
+                        <div className="p-1.5 bg-teal-50 text-teal-650 rounded-lg"><CreditCard size={15} /></div>
+                        <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest text-right">Cash Received</span>
+                     </div>
+                     <div className="text-base sm:text-lg md:text-xl font-black text-teal-700 font-mono truncate">₹{stats.cashAmount}</div>
+                   </div>
+                   <div className="text-[9px] text-teal-600 mt-2 font-semibold">Direct hand-to-hand</div>
+                </div>
+
+                {/* Pending Collection */}
+                <div className="bg-white p-4 sm:p-5 rounded-2xl shadow-sm border border-slate-200 hover:shadow-md transition-shadow flex flex-col justify-between">
+                   <div>
+                     <div className="flex justify-between items-start mb-3">
+                        <div className="p-1.5 bg-amber-50 text-amber-605 rounded-lg"><CreditCard size={15} /></div>
+                        <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest text-right">Unpaid Pending</span>
+                     </div>
+                     <div className="text-base sm:text-lg md:text-xl font-black text-amber-700 font-mono truncate">₹{stats.pendingAmount}</div>
+                   </div>
+                   <div className="text-[9px] text-amber-600 mt-2 font-semibold">Outstanding balance</div>
                 </div>
               </div>
 
@@ -3497,6 +3750,8 @@ export default function App() {
                 allRecords={records}
                 searchQuery={searchQuery}
                 setSearchQuery={setSearchQuery}
+                showLedgerSearchOverlay={showLedgerSearchOverlay}
+                setShowLedgerSearchOverlay={setShowLedgerSearchOverlay}
                 statusFilter={statusFilter}
                 setStatusFilter={setStatusFilter}
                 dateStart={dateStart}
@@ -3510,6 +3765,22 @@ export default function App() {
                 exportLedger={exportLedger}
                 importLedger={importLedger}
                 handlePrint={handlePrint}
+                handlePrintPreview={handlePrintPreview}
+                handleDownloadPDF={handleDownloadPDF}
+                recordsToPrintMode={recordsToPrintMode}
+                setRecordsToPrintMode={setRecordsToPrintMode}
+                showPDFOptionModal={showPDFOptionModal}
+                setShowPDFOptionModal={setShowPDFOptionModal}
+                showPrintPreviewModal={showPrintPreviewModal}
+                setShowPrintPreviewModal={setShowPrintPreviewModal}
+                pdfOptionSource={pdfOptionSource}
+                pdfSelectIds={pdfSelectIds}
+                triggerPrint={triggerPrint}
+                triggerDownloadPDF={triggerDownloadPDF}
+                printFieldVisibility={printFieldVisibility}
+                setPrintFieldVisibility={setPrintFieldVisibility}
+                presetSaveSuccess={presetSaveSuccess}
+                setPresetSaveSuccess={setPresetSaveSuccess}
                 deleteRecord={deleteRecord}
                 setEditingRecord={setEditingRecord}
                 updateRecord={updateRecord}
@@ -3672,12 +3943,28 @@ export default function App() {
             </div>
           )}
         </AnimatePresence>
+
+        <PrintPreviewModal
+          isOpen={showPrintPreviewModal}
+          onClose={() => setShowPrintPreviewModal(false)}
+          allRecords={records}
+          filteredRecords={filteredRecords}
+          recordsToPrintMode={recordsToPrintMode}
+          setRecordsToPrintMode={setRecordsToPrintMode}
+          printFieldVisibility={printFieldVisibility}
+          setPrintFieldVisibility={setPrintFieldVisibility}
+          triggerPrint={triggerPrint}
+          triggerDownloadPDF={triggerDownloadPDF}
+          pdfSelectIds={pdfSelectIds}
+          customFields={customFields}
+        />
+
             </main>
           </div>
         </div>
       </div>
 
-      <footer className="hidden sm:block py-6 text-center text-[10px] font-bold text-slate-400 uppercase tracking-widest border-t border-slate-100 bg-white">
+      <footer className="hidden sm:block py-6 text-center text-[10px] font-bold text-slate-400 uppercase tracking-widest border-t border-slate-100 bg-white print:hidden">
         {user ? (
           <>Uniform Sales CRM &bull; &copy; 2026 Internal Operations &bull; Restricted Access</>
         ) : (
@@ -3693,7 +3980,7 @@ export default function App() {
             animate={{ y: 0 }}
             exit={{ y: 100 }}
             transition={{ type: 'spring', damping: 25, stiffness: 200 }}
-            className="fixed bottom-0 left-0 right-0 h-[84px] bg-white/80 backdrop-blur-2xl border-t border-slate-200/50 flex sm:hidden justify-between items-center z-[100] shadow-[0_-20px_40px_rgba(0,0,0,0.08)] pb-safe px-6" 
+            className="fixed bottom-0 left-0 right-0 h-[84px] bg-white/80 backdrop-blur-2xl border-t border-slate-200/50 flex md:hidden justify-between items-center z-[100] shadow-[0_-20px_40px_rgba(0,0,0,0.08)] pb-safe px-6 print:hidden" 
             role="tablist" 
             aria-label="Mobile Navigation"
           >
@@ -3773,6 +4060,494 @@ export default function App() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Print-only layout supporting both Cards Grid and Table summary */}
+      {recordsToPrint.length > 0 && (
+        <div 
+          id="pdf-render-root" 
+          className={`${isGeneratingPDF ? 'block fixed left-0 top-0 z-[-50] bg-white opacity-100' : 'hidden print:block'} print-invoices-container`} 
+          style={{ margin: 0, padding: 0 }}
+        >
+          {(() => {
+            const isCards = recordsToPrintMode === 'cards';
+            const isInvoice = recordsToPrintMode === 'invoice';
+            const chunkSize = isInvoice ? 1 : (isCards ? 4 : 15);
+            const chunks: SaleRecord[][] = [];
+            for (let i = 0; i < recordsToPrint.length; i += chunkSize) {
+              chunks.push(recordsToPrint.slice(i, i + chunkSize));
+            }
+            return chunks.map((chunkRecords, pageIndex) => (
+              <div 
+                key={pageIndex} 
+                className="print-page relative flex flex-col justify-between box-border bg-white"
+                style={{
+                  width: '202mm',
+                  height: '287mm',
+                  pageBreakAfter: 'always',
+                  breakAfter: 'page',
+                  padding: isInvoice ? '8mm' : (isCards ? '6mm' : '8mm'),
+                  boxSizing: 'border-box',
+                }}
+              >
+                {isInvoice ? (
+                  /* PORTRAIT FORMAL SINGLE INVOICE (A4) */
+                  <div className="flex flex-col justify-between h-full bg-white text-slate-850 p-3 flex-grow animate-fadeIn" style={{ height: '271mm' }}>
+                    <div>
+                      {/* Premium Corporate Letterhead Banner */}
+                      {printFieldVisibility.storeHeader && (
+                        <div className="flex justify-between items-start border-b-2 border-slate-900 pb-5 mb-5">
+                          <div className="flex gap-4 items-center">
+                            <div className="w-12 h-12 bg-indigo-950 rounded-2xl flex items-center justify-center text-white font-black font-mono text-lg tracking-widest shadow-md">
+                              U
+                            </div>
+                            <div>
+                              <h2 className="text-base font-black uppercase text-indigo-950 tracking-wider font-sans">SCHOOL WEAR STATIONERY</h2>
+                              <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mt-0.5">Authorized Uniform &amp; Materials Distributor</p>
+                              <p className="text-[8px] text-slate-400 font-mono mt-1">Delhi NCR &bull; support@uniformstore.example.com &bull; Tel: +91 11 2345 6789</p>
+                            </div>
+                          </div>
+                          <div className="text-right flex flex-col items-end">
+                            <span className="text-[8px] font-extrabold uppercase tracking-widest text-slate-400 mb-1">Receipt Serial No.</span>
+                            <span className="text-sm font-black font-mono text-indigo-950 bg-indigo-50/50 border-2 border-indigo-900/10 px-3.5 py-1 rounded-xl shadow-xs inline-block">
+                              #{chunkRecords[0].srNo}
+                            </span>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Split Info Bento Grid: Customer details & Payment parameters */}
+                      <div className="grid grid-cols-2 gap-6 bg-slate-50/80 border border-slate-200 rounded-2xl p-4 mb-5">
+                        <div className="space-y-1.5">
+                          <span className="text-[8px] font-black uppercase tracking-widest text-slate-400 block border-b border-slate-100 pb-1">Invoice Issued To:</span>
+                          <div className="pt-0.5">
+                            <span className="text-[8px] font-extrabold text-slate-400 uppercase tracking-widest block">Student Customer</span>
+                            <h3 className="text-sm font-black text-slate-900 uppercase tracking-wide font-sans mt-0.5">{chunkRecords[0].name}</h3>
+                          </div>
+                          <div className="flex items-center gap-2 pt-1">
+                            <span className="text-[8px] font-extrabold text-slate-400 uppercase tracking-widest">Aca. Class:</span>
+                            <span className="text-[10px] font-black bg-indigo-100 text-indigo-900 px-2 py-0.5 rounded-lg border border-indigo-200/50 inline-block font-mono">
+                              {chunkRecords[0].studentClass}
+                            </span>
+                          </div>
+                        </div>
+
+                        {printFieldVisibility.paymentDetails && (
+                          <div className="text-right border-l border-slate-200 pl-6 font-mono space-y-1.5">
+                            <span className="text-[8px] font-black uppercase tracking-widest text-slate-400 block border-b border-slate-100 pb-1 text-right">Receipt Details:</span>
+                            <div className="space-y-1 text-[9px] text-slate-600 pt-0.5">
+                              <div className="flex justify-between">
+                                <span className="text-slate-400 uppercase text-[8px] font-black tracking-wider">Date of Sale:</span>
+                                <span className="font-extrabold text-slate-800">{chunkRecords[0].date}</span>
+                              </div>
+                              <div className="flex justify-between items-center gap-2">
+                                <span className="text-slate-400 uppercase text-[8px] font-black tracking-wider">Payment Status:</span>
+                                <span className={`px-2 py-0.5 rounded-lg text-[8px] font-black uppercase tracking-wider ${
+                                  chunkRecords[0].paymentMode === 'Pending' 
+                                    ? 'bg-amber-100 text-amber-900 border border-amber-300/60' 
+                                    : 'bg-emerald-100 text-emerald-900 border border-emerald-300/60'
+                                }`}>
+                                  {chunkRecords[0].paymentMode === 'Pending' ? 'Pending' : 'Settled'}
+                                </span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-slate-400 uppercase text-[8px] font-black tracking-wider">Payment Mode:</span>
+                                <span className="font-extrabold text-slate-800 uppercase">{chunkRecords[0].paymentMode}</span>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Items table */}
+                      {printFieldVisibility.itemsBreakdown && (
+                        <div className="mt-5">
+                          <div className="flex items-center gap-2 mb-2">
+                            <span className="text-[8px] font-black uppercase tracking-widest text-slate-400">Itemized Purchase Breakdown</span>
+                            <div className="flex-1 h-[1px] bg-slate-100"></div>
+                          </div>
+                          <table className="w-full text-left border border-slate-200 rounded-xl overflow-hidden shadow-xs" style={{ borderCollapse: 'separate', borderSpacing: 0, fontSize: '9px' }}>
+                            <thead>
+                              <tr className="border-b border-slate-300 bg-slate-900 text-white uppercase text-[8px] font-black tracking-widest">
+                                <th className="py-2.5 px-3 text-center w-10 rounded-tl-xl">#</th>
+                                <th className="py-2.5 px-3">Uniform Particular / Item Name</th>
+                                <th className="py-2.5 px-3 text-center w-20">Size</th>
+                                <th className="py-2.5 px-3 text-center w-16">Qty</th>
+                                <th className="py-2.5 px-3 text-right w-24">Unit Price (₹)</th>
+                                <th className="py-2.5 px-3 text-right w-28 rounded-tr-xl">Line Total (₹)</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100 bg-white">
+                              {chunkRecords[0].items.map((item, idx) => (
+                                <tr key={item.id || idx} className={`text-slate-800 font-medium ${idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/40'}`}>
+                                  <td className="py-2.5 px-3 text-center font-mono text-slate-400 font-bold border-r border-slate-100">{idx + 1}</td>
+                                  <td className="py-2.5 px-3 font-black text-indigo-950 uppercase">{item.item}</td>
+                                  <td className="py-2.5 px-3 text-center font-mono font-bold text-slate-600 border-x border-slate-100">{item.size}</td>
+                                  <td className="py-2.5 px-3 text-center font-mono font-bold text-slate-700 border-r border-slate-100">{item.qty}</td>
+                                  <td className="py-2.5 px-3 text-right font-mono text-slate-500 font-bold border-r border-slate-100">₹{item.rate}</td>
+                                  <td className="py-2.5 px-3 text-right font-mono font-black text-slate-900">₹{item.qty * item.rate}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+
+                      {/* Custom metadata questions or notes */}
+                      {((printFieldVisibility.adminNotes && chunkRecords[0].notes) || (printFieldVisibility.customFields && chunkRecords[0].customData && Object.keys(chunkRecords[0].customData).length > 0)) && (
+                        <div className="mt-5 p-3 bg-indigo-50/20 rounded-2xl border border-indigo-100/60 border-dashed space-y-2 text-[9px]">
+                          {printFieldVisibility.adminNotes && chunkRecords[0].notes && (
+                            <div className="space-y-0.5">
+                              <span className="font-black text-slate-400 uppercase tracking-widest text-[8px]">Admin Remarks / Notes:</span>
+                              <p className="text-slate-700 font-medium italic pl-1 border-l-2 border-indigo-300">
+                                &ldquo;{chunkRecords[0].notes}&rdquo;
+                              </p>
+                            </div>
+                          )}
+                          {printFieldVisibility.customFields && chunkRecords[0].customData && Object.keys(chunkRecords[0].customData).filter(k => chunkRecords[0].customData[k] !== undefined && chunkRecords[0].customData[k] !== '').map((key) => {
+                            const field = customFields?.find((f: any) => f.id === key);
+                            const label = field ? field.label : key;
+                            return (
+                              <div key={key} className="flex justify-between font-mono text-[9px] text-slate-600 py-0.5 border-b border-slate-100/40 last:border-0">
+                                <span className="font-extrabold uppercase text-[8px] text-slate-400 tracking-wider">{label}:</span>
+                                <span className="font-bold text-slate-950">{String(chunkRecords[0].customData[key])}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Bottom row calculations panel and signature lines */}
+                    <div className="border-t-2 border-slate-900 pt-4 space-y-4">
+                      <div className="flex justify-between items-start">
+                        {/* Policy & Cashier Stamp Section */}
+                        <div className="text-left font-sans space-y-3.5 flex-1 max-w-sm">
+                          {printFieldVisibility.cashierSignature && (
+                            <div className="pt-2">
+                              <div className="border-b border-slate-300 w-44 pb-1 mb-1.5 h-10"></div>
+                              <span className="text-[8px] font-black text-slate-400 uppercase tracking-widest block">Authorized Signatory Stamp</span>
+                              <span className="text-[7.5px] text-slate-400 font-medium block mt-0.5">Uniform Counter Manager Office</span>
+                            </div>
+                          )}
+                          <div className="p-3 bg-slate-50 border border-slate-200/60 rounded-xl">
+                            <span className="text-[8px] font-black uppercase tracking-widest text-slate-400 block mb-1">Exchange Policy</span>
+                            <p className="text-[8px] text-slate-500 font-medium leading-normal">
+                              Goods once sold can be exchanged within 7 days ONLY if presented with the original label, tags intact, and this transaction printed invoice copy. Fits must be unused and clean.
+                            </p>
+                          </div>
+                        </div>
+
+                        {/* Calculated Bill totals with design hierarchy */}
+                        <div className="w-64 space-y-1.5 bg-slate-50 border border-slate-200 rounded-2xl p-3.5 shadow-xs font-mono">
+                          <div className="flex justify-between text-[9px] text-slate-500 pb-1 border-b border-slate-100">
+                            <span>Gross Subtotal:</span>
+                            <span className="font-bold">₹{chunkRecords[0].totalAmount + (chunkRecords[0].discount || 0)}</span>
+                          </div>
+                          {chunkRecords[0].discount > 0 && (
+                            <div className="flex justify-between text-[9px] text-red-600 font-bold pb-1 border-b border-slate-100">
+                              <span>Discount Applied:</span>
+                              <span>-₹{chunkRecords[0].discount}</span>
+                            </div>
+                          )}
+                          <div className="flex justify-between text-[9px] text-emerald-600 font-bold pb-1 border-b border-slate-100">
+                            <span>Amount Received:</span>
+                            <span>₹{chunkRecords[0].paidAmount || 0}</span>
+                          </div>
+                          <div className="flex justify-between items-center pt-1.5 pb-1">
+                            <span className="text-[9px] font-black uppercase text-indigo-950 tracking-wider">Net Payable:</span>
+                            <span className="text-base font-black text-indigo-950 font-mono">₹{chunkRecords[0].totalAmount}</span>
+                          </div>
+                          {printFieldVisibility.balancesOutstanding && chunkRecords[0].totalAmount - (chunkRecords[0].paidAmount || 0) > 0 && (
+                            <div className="bg-rose-50 text-rose-900 p-2 rounded-xl text-[8.5px] font-black uppercase tracking-tight font-sans text-center mt-2 border border-rose-200/60 shadow-xs">
+                              Outstanding Balance: ₹{chunkRecords[0].totalAmount - (chunkRecords[0].paidAmount || 0)}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      
+                      {/* Document Bottom Footer Line */}
+                      <div className="text-center font-mono text-[8px] text-slate-400 uppercase tracking-widest pt-2 border-t border-slate-100">
+                        === Thank you for your custom &amp; business! ===
+                      </div>
+                    </div>
+                  </div>
+                ) : isCards ? (
+                  /* 4 CARDS PER PAGE (2x2 Grid) */
+                  <div className="print-grid grid grid-cols-2 grid-rows-2 gap-4 flex-1 animate-fadeIn" style={{ height: '266mm' }}>
+                    {chunkRecords.map((rec) => {
+                      const subtotalAmount = rec.totalAmount + (rec.discount || 0);
+                      const discountPercent = rec.discount && subtotalAmount > 0
+                        ? Math.round((rec.discount / subtotalAmount) * 100)
+                        : 0;
+                      return (
+                        <div 
+                          key={rec.id} 
+                          className="bg-white border-2 border-slate-300 rounded-3xl p-5 flex flex-col justify-between h-full box-border shadow-sm text-slate-900"
+                          style={{ pageBreakInside: 'avoid', breakInside: 'avoid' }}
+                        >
+                          {/* Top row: Sr No, Date */}
+                          <div>
+                            <div className="flex justify-between items-center border-b border-dashed border-slate-200 pb-2 mb-3">
+                              <div className="flex flex-col">
+                                {printFieldVisibility.storeHeader ? (
+                                  <>
+                                    <span className="text-[10px] font-extrabold font-mono text-blue-600 tracking-wider">OFFICIAL RECEIPT</span>
+                                    <span className="text-[12px] font-black font-mono text-slate-800">NO. #{rec.srNo}</span>
+                                  </>
+                                ) : (
+                                  <span className="text-[12px] font-black font-mono text-slate-800">#{rec.srNo}</span>
+                                )}
+                              </div>
+                              {printFieldVisibility.paymentDetails && (
+                                <div className="text-right">
+                                  <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block">Issue Date</span>
+                                  <span className="text-[10px] font-bold font-mono text-slate-700">{rec.date}</span>
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Student details card */}
+                            <div className="bg-slate-50 border border-slate-100 rounded-xl p-2.5 mb-3 flex justify-between items-center">
+                              <div>
+                                <span className="text-[8px] font-black text-slate-400 uppercase tracking-widest block">Student Name</span>
+                                <h4 className="text-xs font-black text-slate-900 uppercase truncate max-w-[130px]">{rec.name}</h4>
+                              </div>
+                              <div className="text-right font-mono flex-shrink-0">
+                                <span className="text-[8px] font-black text-slate-400 uppercase tracking-widest block">Class</span>
+                                <span className="text-[10px] font-black bg-blue-100 text-blue-800 px-2 py-0.5 rounded border border-blue-200 inline-block">{rec.studentClass}</span>
+                              </div>
+                            </div>
+
+                            {/* Items details block */}
+                            {printFieldVisibility.itemsBreakdown && (
+                              <div className="flex-1 min-h-[75px] max-h-[110px] overflow-hidden flex flex-col justify-start">
+                                <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest block mb-1">Items & Breakdown</span>
+                                <div className="space-y-1 overflow-hidden" style={{ maxHeight: '90px' }}>
+                                  {rec.items.map((item, idx) => (
+                                    <div key={item.id || idx} className="flex justify-between items-center text-[10px] border-b border-slate-50 pb-0.5">
+                                      <span className="text-slate-700 font-bold truncate max-w-[140px]">
+                                        &bull; {item.item} ({item.size})
+                                      </span>
+                                      <span className="font-mono text-slate-500 text-[9px] flex-shrink-0">
+                                        {item.qty} x ₹{item.rate}
+                                      </span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Custom values / details */}
+                            {((printFieldVisibility.adminNotes && rec.notes) || (printFieldVisibility.customFields && rec.customData && Object.keys(rec.customData).length > 0)) && (
+                              <div className="bg-slate-50/50 rounded-lg p-2 mt-2 space-y-0.5 text-[8px] border border-slate-100">
+                                {printFieldVisibility.adminNotes && rec.notes && (
+                                  <p className="text-slate-500 italic truncate" title={rec.notes}>
+                                    Note: {rec.notes}
+                                  </p>
+                                )}
+                                {printFieldVisibility.customFields && rec.customData && Object.keys(rec.customData).filter(k => rec.customData[k] !== undefined && rec.customData[k] !== '').map((key) => {
+                                  const field = customFields?.find((f: any) => f.id === key);
+                                  const label = field ? field.label : key;
+                                  return (
+                                    <div key={key} className="flex justify-between font-mono text-[8px] text-slate-400">
+                                      <span>{label}:</span>
+                                      <span className="font-bold text-slate-600">{String(rec.customData[key])}</span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Bottom part / totals panel */}
+                          <div className="border-t border-slate-200 pt-2 space-y-1.5 font-sans">
+                            {/* Dynamic Payment Status Badge Block */}
+                            {printFieldVisibility.paymentDetails && (() => {
+                              const isPaid = rec.paymentMode !== 'Pending' && (rec.paidAmount || 0) >= rec.totalAmount;
+                              const remainingBalance = Math.max(0, rec.totalAmount - (rec.paidAmount || 0));
+                              const statusLabel = isPaid ? 'Paid' : 'Pending';
+                              return (
+                                <div className="flex justify-between items-center border-b border-dashed border-slate-100 pb-1.5 mb-1 text-[9px]">
+                                  <span className="font-black text-slate-400 uppercase tracking-widest">Payment Status</span>
+                                  <div className="flex items-center gap-2">
+                                    <span className={`px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-wider ${
+                                      isPaid 
+                                        ? 'bg-emerald-100 text-emerald-800 border border-emerald-200' 
+                                        : 'bg-rose-100 text-rose-800 border border-rose-200'
+                                    }`}>
+                                      {statusLabel}
+                                    </span>
+                                    {printFieldVisibility.balancesOutstanding && remainingBalance > 0 && (
+                                      <span className="font-extrabold font-mono text-amber-600 text-[8px] tracking-tight bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
+                                        Bal: ₹{remainingBalance}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })()}
+
+                            <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[9px] font-mono text-slate-400">
+                              <div className="flex justify-between">
+                                <span>Subtotal:</span>
+                                <span className="font-semibold text-slate-600">₹{subtotalAmount}</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span>Discount%:</span>
+                                <span className={discountPercent > 0 ? "font-bold text-red-500" : ""}>
+                                  {discountPercent > 0 ? `${discountPercent}% (-₹${rec.discount})` : '0%'}
+                                </span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span>Paid Amount:</span>
+                                <span className="font-bold text-emerald-600">₹{rec.paidAmount || 0}</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span>Method:</span>
+                                <span className={`px-1 rounded text-[8px] font-black uppercase ${
+                                  rec.paymentMode === 'Pending' 
+                                    ? 'bg-amber-50 text-amber-600 border border-amber-200' 
+                                    : 'bg-emerald-50 text-emerald-600 border border-emerald-200'
+                                }`}>
+                                  {rec.paymentMode}
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Total payable banner */}
+                            <div className="flex justify-between items-center bg-slate-50 border border-slate-105 rounded-xl px-2.5 py-1.5">
+                              <div>
+                                <span className="text-[7px] font-black uppercase tracking-wider text-slate-400 block">Total Payable</span>
+                                <span className="text-[9px] font-bold text-slate-500 font-mono">
+                                  {printFieldVisibility.balancesOutstanding && Math.max(0, rec.totalAmount - (rec.paidAmount || 0)) > 0 
+                                    ? `Due: ₹${rec.totalAmount - (rec.paidAmount || 0)}` 
+                                    : 'Fully Paid'}
+                                </span>
+                              </div>
+                              <span className="text-sm font-black font-mono text-slate-900">₹{rec.totalAmount}</span>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {/* Fill empty grid cells to keep container page geometry from shrinking */}
+                    {Array.from({ length: Math.max(0, chunkSize - chunkRecords.length) }).map((_, idx) => (
+                      <div key={`empty-${idx}`} className="border-2 border-dashed border-slate-200 rounded-3xl bg-slate-50/10" />
+                    ))}
+                  </div>
+                ) : (
+                  /* 15 rows tabular current view */
+                  <div className="flex flex-col justify-between flex-1">
+                    <div>
+                      {/* Document header banner */}
+                      <div className="border-b-2 border-slate-900 pb-3 mb-4 flex justify-between items-end">
+                        <div>
+                          <h1 className="text-sm font-black uppercase text-slate-800 tracking-wider">Uniform Sales Transaction List</h1>
+                          <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mt-0.5">
+                            Spreadsheet Database Report &bull; Created {new Date().toLocaleDateString()}
+                          </p>
+                        </div>
+                        <div className="text-right">
+                          <span className="text-[8px] font-black text-slate-400 uppercase tracking-widest block">Spreadsheet Range</span>
+                          <span className="text-xs font-black font-mono text-slate-800">
+                            {pageIndex * 15 + 1} - {Math.min((pageIndex + 1) * 15, recordsToPrint.length)} of {recordsToPrint.length}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Spreadsheet view table */}
+                      <table className="w-full text-left" style={{ borderCollapse: 'collapse', fontSize: '9px' }}>
+                        <thead>
+                          <tr className="border-b border-slate-300 text-slate-400 uppercase text-[8px] font-black tracking-widest bg-slate-50/50">
+                            <th className="py-2 px-1 font-mono text-center">Sr. #</th>
+                            <th className="py-2 px-1 text-center">Date</th>
+                            <th className="py-2 px-2">Student Name</th>
+                            <th className="py-2 px-1 text-center">Class</th>
+                            <th className="py-2 px-2">Items Breakdown</th>
+                            <th className="py-2 px-1 text-right">Payment</th>
+                            <th className="py-2 px-2 text-right">Paid / Total</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {chunkRecords.map((rec) => (
+                            <tr key={rec.id} className="text-slate-800 font-medium">
+                              <td className="py-2 px-1 font-mono font-bold text-center text-slate-500">#{rec.srNo}</td>
+                              <td className="py-2 px-1 text-center font-mono text-slate-400 text-[8px]">{rec.date}</td>
+                              <td className="py-2 px-2 font-bold uppercase truncate max-w-[120px]">{rec.name}</td>
+                              <td className="py-2 px-1 text-center font-mono">
+                                <span className="bg-slate-100 px-1.5 py-0.5 rounded text-[8px] border border-slate-200">{rec.studentClass}</span>
+                              </td>
+                              <td className="py-2 px-2 text-[8px] text-slate-500">
+                                <div className="max-w-[180px] truncate">
+                                  {rec.items.map(i => `${i.item} (${i.size}) x${i.qty}`).join(', ')}
+                                </div>
+                              </td>
+                              <td className="py-2 px-1 text-right font-mono">
+                                <span className={`text-[8px] font-black uppercase px-1 py-0.5 rounded ${
+                                  rec.paymentMode === 'Pending' ? 'text-amber-600 bg-amber-50' : 'text-emerald-600 bg-emerald-50'
+                                }`}>
+                                  {rec.paymentMode}
+                                </span>
+                              </td>
+                              <td className="py-2 px-2 text-right font-mono text-[8px]">
+                                <span className="font-bold">₹{rec.paidAmount || 0}</span> / ₹{rec.totalAmount}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {/* Elegant Footer with Page Numbers */}
+                <div className="border-t border-slate-300 pt-2 flex justify-between items-center text-[10px] font-bold font-mono text-slate-400 uppercase tracking-widest mt-2">
+                  <span>{isCards ? 'Sales Ledger Invoice Cards' : 'Transaction Ledger Sheet'}</span>
+                  <span>Page {pageIndex + 1} of {chunks.length}</span>
+                </div>
+              </div>
+            ));
+          })()}
+        </div>
+      )}
+
+      {/* Modern PDF Generation Loader Overlay */}
+      <AnimatePresence>
+        {isGeneratingPDF && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-slate-900/80 backdrop-blur-md flex items-center justify-center z-[999]"
+          >
+            <div className="bg-white rounded-2xl p-8 max-w-sm w-full mx-4 shadow-2xl border border-slate-100 flex flex-col items-center text-center">
+              <div className="relative w-16 h-16 mb-4 flex items-center justify-center">
+                <Printer className="text-blue-600 animate-bounce absolute" size={28} />
+                <svg className="animate-spin w-16 h-16 text-blue-500/20" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" fill="none"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                </svg>
+              </div>
+              <h3 className="text-sm font-black text-slate-900 uppercase tracking-wider mb-1">
+                Generating High-Fidelity PDF
+              </h3>
+              <p className="text-xs text-slate-400 mb-6 font-semibold uppercase tracking-widest font-mono">
+                Page {pdfProgress.current} of {pdfProgress.total}
+              </p>
+              
+              <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden mb-2">
+                <div 
+                  className="bg-blue-600 h-full transition-all duration-300"
+                  style={{ width: `${(pdfProgress.current / (pdfProgress.total || 1)) * 100}%` }}
+                />
+              </div>
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none">
+                Processing Invoice Layout...
+              </span>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -3834,12 +4609,19 @@ function ProfileSection({ user, setUser, logout }: any) {
     e.preventDefault();
     setIsUpdating(true);
     try {
-      // If username changed, check for uniqueness
-      if (username && username !== user.username) {
+      const trimmedUsername = username.trim().toLowerCase();
+      // If username changed, check for uniqueness and pattern
+      if (trimmedUsername && trimmedUsername !== user.username) {
+        if (!/^[a-zA-Z0-9_]{3,15}$/.test(trimmedUsername)) {
+          setMsg({ type: 'error', text: 'Username must be 3-15 characters long and contain only letters, numbers, or underscores.' });
+          setIsUpdating(false);
+          return;
+        }
+
         const usersRef = collection(db, 'users');
         const allUsersSnapshot = await getDocs(usersRef);
         const duplicate = allUsersSnapshot.docs.find(d => 
-          d.id !== user.id && d.data().username?.toLowerCase() === username.toLowerCase()
+          d.id !== user.id && d.data().username?.toLowerCase() === trimmedUsername
         );
         
         if (duplicate) {
@@ -3849,8 +4631,8 @@ function ProfileSection({ user, setUser, logout }: any) {
         }
       }
 
-      const updates: any = { name, phone };
-      if (username) updates.username = username;
+      const updates: any = { name: name.trim(), phone: phone.trim() };
+      if (trimmedUsername) updates.username = trimmedUsername;
 
       await updateDoc(doc(db, 'users', user.id), updates);
       const updatedUser = { ...user, ...updates };
@@ -3860,7 +4642,58 @@ function ProfileSection({ user, setUser, logout }: any) {
       setMsg({ type: 'error', text: 'Failed to update profile in database.' });
     }
     setIsUpdating(false);
-    setTimeout(() => setMsg(null), 3000);
+    setTimeout(() => setMsg(null), 3500);
+  };
+
+  const [isChangingPassword, setIsChangingPassword] = useState(false);
+
+  const handleDirectPasswordChange = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmedOld = currentPassword.trim();
+    const trimmedNew = newPassword.trim();
+    if (!trimmedOld || !trimmedNew) {
+      setMsg({ type: 'error', text: 'Please fill in both current and new passwords.' });
+      return;
+    }
+    if (trimmedNew.length < 6) {
+      setMsg({ type: 'error', text: 'New password must be at least 6 characters.' });
+      return;
+    }
+    if (!auth.currentUser || !auth.currentUser.email) {
+      setMsg({ type: 'error', text: 'User is not logged in or email is missing.' });
+      return;
+    }
+
+    setIsChangingPassword(true);
+    try {
+      // Reauthenticate user
+      const credential = EmailAuthProvider.credential(auth.currentUser.email, trimmedOld);
+      await reauthenticateWithCredential(auth.currentUser, credential);
+
+      // Update password in Firebase Auth
+      await updatePassword(auth.currentUser, trimmedNew);
+
+      // Also update the password in the database
+      await updateDoc(doc(db, 'users', user.id), {
+        password: trimmedNew
+      });
+
+      setMsg({ type: 'success', text: 'Password updated directly in system and database successfully!' });
+      setCurrentPassword('');
+      setNewPassword('');
+    } catch (err: any) {
+      console.error("Direct password change failed", err);
+      let errMsg = err.message || "Failed to update password.";
+      if (err.code === 'auth/wrong-password') {
+        errMsg = "The current password you entered is incorrect.";
+      } else if (err.code === 'auth/weak-password') {
+        errMsg = "The new password is too weak. Please choose a stronger password.";
+      }
+      setMsg({ type: 'error', text: errMsg });
+    } finally {
+      setIsChangingPassword(false);
+      setTimeout(() => setMsg(null), 5000);
+    }
   };
 
   const handleChangePassword = async (e: React.FormEvent) => {
@@ -4038,20 +4871,62 @@ function ProfileSection({ user, setUser, logout }: any) {
                      <h3 className="text-[11px] font-black uppercase tracking-widest text-slate-900">Security & Access</h3>
                    </div>
                    
-                   <div className="space-y-4">
-                      <div className="p-5 bg-white border border-slate-200 rounded-2xl space-y-3">
-                        <p className="text-xs text-slate-600 font-medium leading-relaxed">
-                          To change your password or security credentials, we'll send a secure link to your registered email address.
-                        </p>
-                        <button 
-                          onClick={handleChangePassword}
-                          disabled={isSubmitting}
-                          className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-500/20 active:scale-95 flex items-center justify-center gap-2 h-12"
-                        >
-                          {isSubmitting ? <Loader2 size={16} className="animate-spin" /> : <Mail size={16} />}
-                          {isSubmitting ? 'Sending Request...' : 'Trigger Password Reset'}
-                        </button>
-                      </div>
+                                       <form onSubmit={handleDirectPasswordChange} className="space-y-4">
+                       <div className="space-y-1.5 align-left text-left">
+                          <label className="text-[9px] font-black uppercase text-slate-400 ml-1">Current Password</label>
+                          <input 
+                            type="password"
+                            value={currentPassword}
+                            onChange={(e) => setCurrentPassword(e.target.value)}
+                            placeholder="••••••••"
+                            className="w-full px-5 py-4 bg-white border border-slate-200 rounded-2xl text-slate-900 font-bold text-sm focus:border-indigo-600 focus:ring-8 focus:ring-indigo-600/5 outline-none transition-all shadow-sm"
+                            required
+                          />
+                       </div>
+
+                       <div className="space-y-1.5 align-left text-left">
+                          <label className="text-[9px] font-black uppercase text-slate-400 ml-1">New Password</label>
+                          <input 
+                            type="password"
+                            value={newPassword}
+                            onChange={(e) => setNewPassword(e.target.value)}
+                            placeholder="At least 6 characters"
+                            className="w-full px-5 py-4 bg-white border border-slate-200 rounded-2xl text-slate-900 font-bold text-sm focus:border-indigo-600 focus:ring-8 focus:ring-indigo-600/5 outline-none transition-all shadow-sm"
+                            required
+                          />
+                       </div>
+
+                       <button 
+                         type="submit"
+                         disabled={isChangingPassword}
+                         className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-500/20 active:scale-95 flex items-center justify-center gap-2 h-12 disabled:opacity-50"
+                       >
+                         {isChangingPassword ? <Loader2 size={16} className="animate-spin" /> : <Lock size={16} />}
+                         {isChangingPassword ? 'Updating Password...' : 'Save New Password'}
+                       </button>
+                    </form>
+
+                    <div className="border-t border-slate-200/60 my-4" />
+
+                    <div className="space-y-4">
+                       <div className="p-5 bg-white border border-slate-200 rounded-2xl space-y-3">
+                         <div className="flex items-center gap-2 text-indigo-600">
+                           <Mail size={14} />
+                           <span className="text-[9px] font-black uppercase tracking-wider">Trouble changing directly?</span>
+                         </div>
+                         <p className="text-[11px] text-slate-500 font-medium leading-relaxed text-left">
+                           If you forgot or want to reset your password via email, we'll send a secure password recovery message.
+                         </p>
+                         <button 
+                           type="button"
+                           onClick={handleChangePassword}
+                           disabled={isSubmitting}
+                           className="w-full py-3 bg-slate-50 text-slate-700 border border-slate-200 rounded-xl font-bold text-[10px] uppercase tracking-wider hover:bg-slate-100 transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50"
+                         >
+                           {isSubmitting ? <Loader2 size={14} className="animate-spin" /> : <Mail size={14} />}
+                           {isSubmitting ? 'Sending Request...' : 'Reset Via Email Link'}
+                         </button>
+                       </div>
 
                       <div className="p-5 bg-white border border-slate-200 rounded-2xl">
                         <div className="flex items-center justify-between mb-2">
@@ -6203,27 +7078,64 @@ function SalesFormSection({
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
                   <div className="space-y-3">
                     <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">Quantity</label>
-                    <div className="relative group/field">
-                      <div className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-400 font-black text-xs group-focus-within/field:text-blue-500 transition-colors uppercase">PCS</div>
-                      <input 
+                    <div className={`relative flex items-center bg-slate-50 border-2 rounded-[20px] overflow-hidden focus-within:bg-white transition-all ${
+                      newItem.qty > (pricing[newItem.item]?.[newItem.size]?.stock || 0) 
+                        ? 'border-red-500 focus-within:ring-8 focus-within:ring-red-50' 
+                        : 'border-transparent focus-within:border-blue-500 focus-within:ring-8 focus-within:ring-blue-50'
+                    }`}>
+                      {/* Step Down Button */}
+                      <button
+                        type="button"
+                        disabled={!can('add') || newItem.qty <= 1}
+                        onClick={() => setNewItem((p: any) => ({ ...p, qty: Math.max(1, (p.qty || 1) - 1) }))}
+                        className="h-14 px-5 text-slate-500 hover:text-blue-600 hover:bg-slate-100/50 disabled:opacity-30 disabled:hover:text-slate-500 disabled:hover:bg-transparent transition-all flex items-center justify-center shrink-0 border-r border-slate-100 cursor-pointer"
+                        title="Decrease Quantity"
+                      >
+                        <Minus size={14} strokeWidth={3} />
+                      </button>
+
+                      {/* Display / Input */}
+                      <div className="relative flex-1 h-14">
+                        <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 font-extrabold text-[9px] uppercase tracking-wider pointer-events-none select-none">PCS</span>
+                        <input 
+                          disabled={!can('add')}
+                          value={newItem.qty === 0 ? "" : newItem.qty} 
+                          onChange={(e) => {
+                            const val = e.target.value === "" ? 0 : Number(e.target.value);
+                            setNewItem((p: any) => ({ ...p, qty: isNaN(val) ? 1 : val }));
+                          }} 
+                          onBlur={() => {
+                            if (newItem.qty < 1) {
+                              setNewItem((p: any) => ({ ...p, qty: 1 }));
+                            }
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              handleAddToCart(e);
+                            }
+                          }}
+                          type="number" 
+                          min="1" 
+                          className={`w-full h-full pl-12 pr-6 bg-transparent outline-none text-base font-mono font-black text-right disabled:opacity-50 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none ${
+                            newItem.qty > (pricing[newItem.item]?.[newItem.size]?.stock || 0) 
+                              ? 'text-red-600' 
+                              : 'text-slate-800'
+                          }`} 
+                          placeholder="1"
+                        />
+                      </div>
+
+                      {/* Step Up Button */}
+                      <button
+                        type="button"
                         disabled={!can('add')}
-                        value={newItem.qty} 
-                        onChange={(e) => setNewItem((p: any) => ({ ...p, qty: Number(e.target.value) }))} 
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') {
-                            e.preventDefault();
-                            handleAddToCart(e);
-                          }
-                        }}
-                        type="number" 
-                        min="1" 
-                        className={`w-full pl-14 pr-6 py-4 bg-slate-50 border-2 rounded-[20px] outline-none text-base font-mono font-black focus:bg-white focus:ring-8 transition-all disabled:opacity-50 text-right ${
-                          newItem.qty > (pricing[newItem.item]?.[newItem.size]?.stock || 0) 
-                            ? 'border-red-500 focus:ring-red-50 text-red-600' 
-                            : 'border-transparent focus:border-blue-500 focus:ring-blue-50'
-                        }`} 
-                        placeholder="1"
-                      />
+                        onClick={() => setNewItem((p: any) => ({ ...p, qty: (p.qty || 0) + 1 }))}
+                        className="h-14 px-5 text-slate-500 hover:text-blue-600 hover:bg-slate-100/50 disabled:opacity-30 disabled:hover:text-slate-500 disabled:hover:bg-transparent transition-all flex items-center justify-center shrink-0 border-l border-slate-100 cursor-pointer"
+                        title="Increase Quantity"
+                      >
+                        <Plus size={14} strokeWidth={3} />
+                      </button>
                     </div>
                     {newItem.qty > (pricing[newItem.item]?.[newItem.size]?.stock || 0) && (
                       <p className="text-[10px] text-red-500 font-bold mt-1 ml-1 animate-pulse">Insufficient Stock!</p>
@@ -6801,6 +7713,35 @@ function SortHeader({ label, sortKey, currentSort, onSort, className = "", ...pr
   );
 }
 
+function highlightText(text: string | null | undefined, query: string) {
+  if (!text) return "";
+  if (!query) return text;
+  
+  const trimmedQuery = query.trim();
+  if (!trimmedQuery) return text;
+  
+  try {
+    const escapedQuery = trimmedQuery.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+    const parts = text.split(new RegExp(`(${escapedQuery})`, 'gi'));
+    
+    return (
+      <>
+        {parts.map((part, index) => 
+          part.toLowerCase() === trimmedQuery.toLowerCase() ? (
+            <mark key={index} className="bg-amber-100 text-amber-950 px-1 py-0.5 rounded font-extrabold border border-amber-200 shadow-sm inline-block leading-none">
+              {part}
+            </mark>
+          ) : (
+            part
+          )
+        )}
+      </>
+    );
+  } catch (e) {
+    return text;
+  }
+}
+
 function LedgerSection({ 
   records, 
   allRecords,
@@ -6819,6 +7760,15 @@ function LedgerSection({
   exportLedger, 
   importLedger,
   handlePrint, 
+  handleDownloadPDF,
+  recordsToPrintMode,
+  setRecordsToPrintMode,
+  showPDFOptionModal,
+  setShowPDFOptionModal,
+  pdfOptionSource,
+  pdfSelectIds,
+  triggerPrint,
+  triggerDownloadPDF,
   deleteRecord,
   setEditingRecord,
   updateRecord,
@@ -6842,19 +7792,43 @@ function LedgerSection({
   setMsg,
   onSort,
   sortConfig,
-  downloadTemplate
+  downloadTemplate,
+  handlePrintPreview,
+  printFieldVisibility,
+  setPrintFieldVisibility,
+  presetSaveSuccess,
+  setPresetSaveSuccess,
+  showLedgerSearchOverlay,
+  setShowLedgerSearchOverlay,
+  showPrintPreviewModal,
+  setShowPrintPreviewModal
 }: any) {
   const [editingCell, setEditingCell] = useState<{ id: string, field: string } | null>(null);
+  const [isPrintDropdownOpen, setIsPrintDropdownOpen] = useState(false);
+  const [isExportDropdownOpen, setIsExportDropdownOpen] = useState(false);
   const [quickAdd, setQuickAdd] = useState({ name: '', studentClass: CLASSES[0], notes: '' });
   const [footerQuickEntry, setFooterQuickEntry] = useState({ name: '', studentClass: CLASSES[0], totalAmount: '' });
   const [showMobileFilters, setShowMobileFilters] = useState(false);
   const [showImportGuideModal, setShowImportGuideModal ] = useState(false);
-  const [showLedgerSearchOverlay, setShowLedgerSearchOverlay] = useState(false);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const itemNames = Object.keys(pricing);
   const [showQuickForm, setShowQuickForm] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (showImportGuideModal) setShowImportGuideModal(false);
+        if (showExportModal) setShowExportModal(false);
+        if (showQuickForm) setShowQuickForm(false);
+        if (isPrintDropdownOpen) setIsPrintDropdownOpen(false);
+        if (isExportDropdownOpen) setIsExportDropdownOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [showImportGuideModal, showExportModal, showQuickForm, isPrintDropdownOpen, isExportDropdownOpen]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const itemNames = Object.keys(pricing);
   const [bulkDiscount, setBulkDiscount] = useState('0');
   const [exportSettings, setExportSettings] = useState<any>({
     format: 'xlsx',
@@ -6911,6 +7885,184 @@ function LedgerSection({
     customData: {} as Record<string, any>
   });
 
+  const [quickAddProduct, setQuickAddProduct] = useState('');
+  const [quickAddSize, setQuickAddSize] = useState('');
+  const [quickAddQty, setQuickAddQty] = useState(1);
+
+  // States and helper logic for Super-Fast Basic Sale Entry form
+  const [quickFormTab, setQuickFormTab] = useState<'basic' | 'advanced'>('basic');
+  const [basicSale, setBasicSale] = useState<any>({
+    date: new Date().toISOString().split('T')[0],
+    name: '',
+    studentClass: CLASSES[0],
+    product: '',
+    size: '',
+    qty: 1,
+    paymentMode: 'UPI',
+    paidAmount: '',
+    notes: '',
+    customData: {} as Record<string, any>
+  });
+
+  // Auto-fill basic form default product/size on load
+  useEffect(() => {
+    if (itemNames.length > 0 && !basicSale.product) {
+      const firstItem = itemNames[0];
+      const sizes = Object.keys(pricing[firstItem] || {});
+      const firstSize = sizes[0] || '';
+      const rate = pricing[firstItem]?.[firstSize]?.price || 0;
+      setBasicSale((p: any) => ({
+        ...p,
+        product: firstItem,
+        size: firstSize,
+        paidAmount: rate.toString()
+      }));
+    }
+  }, [pricing, itemNames]);
+
+  const handleBasicProductChange = (itemName: string) => {
+    const sizes = Object.keys(pricing[itemName] || {});
+    const firstSize = sizes[0] || '';
+    const rate = pricing[itemName]?.[firstSize]?.price || 0;
+    setBasicSale((p: any) => ({
+      ...p,
+      product: itemName,
+      size: firstSize,
+      paidAmount: p.paymentMode !== 'Pending' ? (rate * p.qty).toString() : '0'
+    }));
+  };
+
+  const handleBasicSizeChange = (sz: string) => {
+    const rate = pricing[basicSale.product]?.[sz]?.price || 0;
+    setBasicSale((p: any) => ({
+      ...p,
+      size: sz,
+      paidAmount: p.paymentMode !== 'Pending' ? (rate * p.qty).toString() : '0'
+    }));
+  };
+
+  const handleBasicQtyChange = (qtyVal: number) => {
+    const qCount = Math.max(1, qtyVal);
+    const rate = pricing[basicSale.product]?.[basicSale.size]?.price || 0;
+    setBasicSale((p: any) => ({
+      ...p,
+      qty: qCount,
+      paidAmount: p.paymentMode !== 'Pending' ? (rate * qCount).toString() : '0'
+    }));
+  };
+
+  const handleBasicPaymentModeChange = (mode: string) => {
+    const rate = pricing[basicSale.product]?.[basicSale.size]?.price || 0;
+    const total = rate * basicSale.qty;
+    setBasicSale((p: any) => ({
+      ...p,
+      paymentMode: mode,
+      paidAmount: mode === 'Pending' ? '0' : total.toString()
+    }));
+  };
+
+  const updateQuickAddCart = (newItems: any[]) => {
+    setFullQuickAdd((p: any) => {
+      const newSum = newItems.reduce((currSum, item) => currSum + (item.qty * item.rate), 0);
+      const discountVal = Number(p.discountPercent) || 0;
+      const finalPayable = Math.max(0, newSum * (1 - discountVal / 100));
+      return {
+        ...p,
+        selectedItems: newItems,
+        totalAmount: newItems.length > 0 ? newSum.toFixed(2) : p.totalAmount,
+        paidAmount: p.paymentMode !== 'Pending' ? finalPayable.toFixed(2) : '0'
+      };
+    });
+  };
+
+  const handleQuickAddProductChange = (itemName: string) => {
+    setQuickAddProduct(itemName);
+    const sizes = Object.keys(pricing[itemName] || {});
+    setQuickAddSize(sizes[0] || '');
+    setQuickAddQty(1);
+  };
+
+  const handleStepQty = (direction: 'up' | 'down') => {
+    setQuickAddQty((p: any) => {
+      if (direction === 'up') return p + 1;
+      return Math.max(1, p - 1);
+    });
+  };
+
+  const addProductToQuickCart = () => {
+    if (!quickAddProduct || !quickAddSize) return;
+    const rate = pricing[quickAddProduct]?.[quickAddSize]?.price || 0;
+    const existsIdx = fullQuickAdd.selectedItems.findIndex(i => i.item === quickAddProduct && i.size === quickAddSize);
+    let nextCart = [...fullQuickAdd.selectedItems];
+    if (existsIdx > -1) {
+      nextCart[existsIdx] = {
+        ...nextCart[existsIdx],
+        qty: nextCart[existsIdx].qty + quickAddQty
+      };
+    } else {
+      nextCart.push({
+        item: quickAddProduct,
+        size: quickAddSize,
+        qty: quickAddQty,
+        rate
+      });
+    }
+    updateQuickAddCart(nextCart);
+    setQuickAddProduct('');
+    setQuickAddSize('');
+    setQuickAddQty(1);
+  };
+
+  const adjustQuickCartItemQty = (idx: number, delta: number) => {
+    let nextCart = [...fullQuickAdd.selectedItems];
+    const newQty = nextCart[idx].qty + delta;
+    if (newQty <= 0) {
+      nextCart = nextCart.filter((_, i) => i !== idx);
+    } else {
+      nextCart[idx] = { ...nextCart[idx], qty: newQty };
+    }
+    updateQuickAddCart(nextCart);
+  };
+
+  const handleQuickAddTotalChange = (total: string) => {
+    setFullQuickAdd((p: any) => {
+      const tot = Number(total) || 0;
+      const discountVal = Number(p.discountPercent) || 0;
+      const finalPayable = Math.max(0, tot * (1 - discountVal / 100));
+      return {
+        ...p,
+        totalAmount: total,
+        paidAmount: p.paymentMode !== 'Pending' ? finalPayable.toFixed(2) : p.paidAmount
+      };
+    });
+  };
+
+  const handleQuickAddDiscountChange = (discount: string) => {
+    setFullQuickAdd((p: any) => {
+      const tot = Number(p.totalAmount) || 0;
+      const discountVal = Number(discount) || 0;
+      const finalPayable = Math.max(0, tot * (1 - discountVal / 100));
+      return {
+        ...p,
+        discountPercent: discount,
+        paidAmount: p.paymentMode !== 'Pending' ? finalPayable.toFixed(2) : p.paidAmount
+      };
+    });
+  };
+
+  const handleQuickAddModeChange = (mode: string) => {
+    setFullQuickAdd((p: any) => {
+      const tot = Number(p.totalAmount) || 0;
+      const discountVal = Number(p.discountPercent) || 0;
+      const finalPayable = Math.max(0, tot * (1 - discountVal / 100));
+      return {
+        ...p,
+        paymentMode: mode,
+        paidAmount: mode === 'Pending' ? '0' : finalPayable.toFixed(2)
+      };
+    });
+  };
+
   const toggleSelectAll = () => {
     if (selectedRecordIds.length === records.length) {
       setSelectedRecordIds([]);
@@ -6957,21 +8109,78 @@ function LedgerSection({
               <span className="sm:hidden">DUP</span>
             </button>
 
-            <div className="relative group/export flex-1 sm:flex-none z-30">
-              <button className="w-full bg-emerald-50 text-emerald-700 px-4 py-2.5 rounded-xl text-xs font-black uppercase hover:bg-emerald-100 transition-all font-mono flex items-center justify-center gap-2 border border-emerald-100">
-                <FileDown size={14} /> <span className="hidden sm:inline">EXPORT</span><span className="sm:hidden">EX</span>
+            <div className="relative flex-1 sm:flex-none z-30">
+              <button 
+                onClick={() => setIsExportDropdownOpen(!isExportDropdownOpen)}
+                className={`w-full px-4 py-2.5 rounded-xl text-xs font-black uppercase transition-all font-mono flex items-center justify-center gap-2 border ${
+                  isExportDropdownOpen 
+                    ? 'bg-emerald-600 text-white border-emerald-600 shadow-lg shadow-emerald-500/25' 
+                    : 'bg-emerald-50 text-emerald-700 border-emerald-100 hover:bg-emerald-100'
+                }`}
+              >
+                <FileDown size={14} /> 
+                <span className="hidden sm:inline">EXPORT</span><span className="sm:hidden">EX</span>
+                <ChevronDown size={10} className={`transform transition-transform duration-200 ${isExportDropdownOpen ? 'rotate-180' : ''}`} />
               </button>
-              <div className="absolute right-0 top-full mt-2 w-48 bg-white border border-slate-200 rounded-xl shadow-xl opacity-0 invisible group-hover/export:opacity-100 group-hover/export:visible transition-all z-50">
-                <button onClick={() => exportLedger('xlsx')} className="w-full text-left px-4 py-4 text-xs font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-2 border-b border-slate-50">
-                  <FileSpreadsheet size={16} className="text-emerald-500" /> Excel (.xlsx)
-                </button>
-                <button onClick={() => exportLedger('csv')} className="w-full text-left px-4 py-4 text-xs font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-2 border-b border-slate-50">
-                  <FileSpreadsheet size={16} className="text-blue-500" /> CSV (.csv)
-                </button>
-                <button onClick={() => setShowExportModal(true)} className="w-full text-left px-4 py-4 text-xs font-black uppercase hover:bg-slate-50 transition-colors flex items-center gap-2">
-                  <Settings size={16} className="text-slate-500" /> Custom Export...
-                </button>
-              </div>
+
+              {/* Accessible Click-outside dark-ish backdrop overlay */}
+              {isExportDropdownOpen && (
+                <div 
+                  className="fixed inset-0 z-40 bg-slate-900/10 backdrop-blur-[0.5px] cursor-default" 
+                  onClick={() => setIsExportDropdownOpen(false)} 
+                />
+              )}
+
+              {isExportDropdownOpen && (
+                <div className="absolute right-0 top-full mt-2 w-60 bg-white border border-slate-200 rounded-xl shadow-xl z-50 overflow-hidden divide-y divide-slate-100 animate-fadeIn">
+                  <div className="px-4 py-2.5 bg-slate-50/80">
+                    <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 block">Export Options</span>
+                    <span className="text-[8px] font-bold text-slate-500 font-mono block mt-0.5">
+                      Ready to compile {records.length} records
+                    </span>
+                  </div>
+                  <div className="py-1">
+                    <button 
+                      onClick={() => {
+                        exportLedger('xlsx');
+                        setIsExportDropdownOpen(false);
+                      }} 
+                      className="w-full text-left px-4 py-3 text-[10px] font-black uppercase hover:bg-slate-50 transition-colors flex flex-col gap-0.5"
+                    >
+                      <div className="flex items-center gap-2 text-slate-700">
+                        <FileSpreadsheet size={13} className="text-emerald-500" /> Excel Spreadsheet (.xlsx)
+                      </div>
+                      <span className="text-[8px] text-slate-400 font-bold ml-5">Download as auto-fit Excel sheet</span>
+                    </button>
+                    <button 
+                      onClick={() => {
+                        exportLedger('csv');
+                        setIsExportDropdownOpen(false);
+                      }} 
+                      className="w-full text-left px-4 py-3 text-[10px] font-black uppercase hover:bg-slate-50 transition-colors flex flex-col gap-0.5"
+                    >
+                      <div className="flex items-center gap-2 text-slate-700">
+                        <FileSpreadsheet size={13} className="text-blue-500" /> CSV database format
+                      </div>
+                      <span className="text-[8px] text-slate-400 font-bold ml-5">Download comma-separated list</span>
+                    </button>
+                  </div>
+                  <div className="py-1 bg-slate-50/50">
+                    <button 
+                      onClick={() => {
+                        setShowExportModal(true);
+                        setIsExportDropdownOpen(false);
+                      }} 
+                      className="w-full text-left px-4 py-3 text-[10px] font-black uppercase hover:bg-slate-50 transition-colors flex flex-col gap-0.5"
+                    >
+                      <div className="flex items-center gap-2 text-slate-700">
+                        <Settings size={13} className="text-indigo-500 animate-pulse" /> Advanced Custom Export
+                      </div>
+                      <span className="text-[8px] text-slate-400 font-bold ml-5">Filter columns & fields manually</span>
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
 
             <input 
@@ -6995,36 +8204,89 @@ function LedgerSection({
               <FileSpreadsheet size={14} className="text-emerald-400" /> <span className="hidden sm:inline">TEMPLATE</span><span className="sm:hidden">TMP</span>
             </button>
 
-            <div className="relative group/print flex-1 sm:flex-none z-30">
-              <button disabled={records.length === 0} className="w-full bg-blue-50 text-blue-600 px-4 py-2.5 rounded-xl text-xs font-black uppercase hover:bg-blue-100 transition-all font-mono flex items-center justify-center gap-2 border border-blue-100 disabled:opacity-50">
-                <Printer size={14} /> <span className="hidden sm:inline">PRINT</span><span className="sm:hidden">PR</span> <ChevronDown size={10} />
+            <div className="relative flex-1 sm:flex-none z-30">
+              <button 
+                disabled={records.length === 0} 
+                onClick={() => setIsPrintDropdownOpen(!isPrintDropdownOpen)}
+                className="w-full bg-blue-50 text-blue-600 px-4 py-2.5 rounded-xl text-xs font-black uppercase hover:bg-blue-100 transition-all font-mono flex items-center justify-center gap-2 border border-blue-100 disabled:opacity-50"
+              >
+                <Printer size={14} /> <span className="hidden sm:inline">PRINT</span><span className="sm:hidden">PR</span> <ChevronDown size={10} className={`transform transition-transform duration-200 ${isPrintDropdownOpen ? 'rotate-180' : ''}`} />
               </button>
-              <div className="absolute right-0 top-full mt-2 w-48 bg-white border border-slate-200 rounded-xl shadow-xl opacity-0 invisible group-hover/print:opacity-100 group-hover/print:visible transition-all z-50 overflow-hidden">
-                <button 
-                  onClick={() => handlePrint()} 
-                  className="w-full text-left px-4 py-4 text-[10px] font-black uppercase hover:bg-blue-50 transition-colors flex flex-col gap-1 border-b border-slate-50"
-                >
-                  <div className="flex items-center gap-2">
-                    <Printer size={14} className="text-blue-500" /> Print Filtered
+              {isPrintDropdownOpen && (
+                <div className="absolute right-0 top-full mt-2 w-56 bg-white border border-slate-200 rounded-xl shadow-xl z-50 overflow-hidden divide-y divide-slate-100">
+                  <div className="py-1">
+                    <button 
+                      onClick={() => {
+                        handlePrintPreview();
+                        setIsPrintDropdownOpen(false);
+                      }} 
+                      className="w-full text-left px-4 py-3 text-[10px] font-black uppercase hover:bg-slate-50 transition-colors flex flex-col gap-0.5 border-b border-dashed border-slate-100"
+                    >
+                      <div className="flex items-center gap-2 text-indigo-600 font-extrabold">
+                        <Eye size={13} className="text-indigo-650" /> Live Print Preview
+                      </div>
+                      <span className="text-[8px] text-slate-400 font-bold ml-5">Interactive paper layout</span>
+                    </button>
+                    <button 
+                      onClick={() => {
+                        handlePrint();
+                        setIsPrintDropdownOpen(false);
+                      }} 
+                      className="w-full text-left px-4 py-3 text-[10px] font-black uppercase hover:bg-slate-50 transition-colors flex flex-col gap-0.5"
+                    >
+                      <div className="flex items-center gap-2 text-slate-700">
+                        <Printer size={13} className="text-blue-500" /> Print Filtered
+                      </div>
+                      <span className="text-[8px] text-slate-400 font-bold ml-5">Total {records.length} records</span>
+                    </button>
+                    <button 
+                      onClick={() => {
+                        handlePrint(selectedRecordIds);
+                        setIsPrintDropdownOpen(false);
+                      }} 
+                      disabled={selectedRecordIds.length === 0}
+                      className="w-full text-left px-4 py-3 text-[10px] font-black uppercase hover:bg-slate-50 transition-colors flex flex-col gap-0.5 disabled:opacity-50 disabled:grayscale"
+                    >
+                      <div className="flex items-center gap-2 text-slate-700">
+                        <CheckCircle2 size={13} className="text-emerald-500" /> Print Selected
+                      </div>
+                      <span className="text-[8px] text-slate-400 font-bold ml-5">{selectedRecordIds.length} records selected</span>
+                    </button>
                   </div>
-                  <span className="text-[8px] text-slate-400 font-bold ml-6">Total {records.length} records</span>
-                </button>
-                <button 
-                  onClick={() => handlePrint(selectedRecordIds)} 
-                  disabled={selectedRecordIds.length === 0}
-                  className="w-full text-left px-4 py-4 text-[10px] font-black uppercase hover:bg-blue-50 transition-colors flex flex-col gap-1 disabled:opacity-50 disabled:grayscale"
-                >
-                  <div className="flex items-center gap-2">
-                    <CheckCircle2 size={14} className="text-emerald-500" /> Print Selected
+                  <div className="py-1 bg-slate-50/50">
+                    <button 
+                      onClick={() => {
+                        handleDownloadPDF();
+                        setIsPrintDropdownOpen(false);
+                      }} 
+                      className="w-full text-left px-4 py-3 text-[10px] font-black uppercase hover:bg-slate-50 transition-colors flex flex-col gap-0.5"
+                    >
+                      <div className="flex items-center gap-2 text-slate-700">
+                        <FileDown size={13} className="text-violet-500" /> Download PDF (Filtered)
+                      </div>
+                      <span className="text-[8px] text-slate-400 font-bold ml-5">Save A4 Cards ({records.length} records)</span>
+                    </button>
+                    <button 
+                      onClick={() => {
+                        handleDownloadPDF(selectedRecordIds);
+                        setIsPrintDropdownOpen(false);
+                      }} 
+                      disabled={selectedRecordIds.length === 0}
+                      className="w-full text-left px-4 py-3 text-[10px] font-black uppercase hover:bg-slate-50 transition-colors flex flex-col gap-0.5 disabled:opacity-50 disabled:grayscale"
+                    >
+                      <div className="flex items-center gap-2 text-slate-700">
+                        <FileDown size={13} className="text-indigo-500" /> Download PDF (Selected)
+                      </div>
+                      <span className="text-[8px] text-slate-400 font-bold ml-5">Save {selectedRecordIds.length} cards to PDF</span>
+                    </button>
                   </div>
-                  <span className="text-[8px] text-slate-400 font-bold ml-6">{selectedRecordIds.length} records selected</span>
-                </button>
-              </div>
+                </div>
+              )}
             </div>
           </div>
         </div>
-        
-        {/* Full Quick Add Form */}
+
+               {/* Full Quick Add Form */}
         <AnimatePresence>
           {showQuickForm && (
             <motion.div
@@ -7034,62 +8296,329 @@ function LedgerSection({
               className="mt-6 overflow-hidden"
             >
               <div className="p-6 bg-blue-50/50 rounded-3xl border-2 border-blue-100/50 space-y-6">
-                <div className="flex items-center justify-between border-b border-blue-100 pb-4">
+                <div className="flex flex-col md:flex-row md:items-center justify-between border-b border-blue-100 pb-4 gap-4">
                   <div className="flex items-center gap-3">
                     <div className="w-10 h-10 bg-blue-600 text-white rounded-xl flex items-center justify-center shadow-lg shadow-blue-600/20">
                       <Plus size={24} strokeWidth={3} />
                     </div>
                     <div>
                       <h3 className="text-sm font-black text-slate-900 uppercase tracking-tight">Express Record Entry</h3>
-                      <p className="text-[10px] font-bold text-blue-600 uppercase tracking-widest">Post a new sale directly to the ledger</p>
+                      <p className="text-[10px] font-bold text-blue-600 uppercase tracking-widest">Post a new sale directly to the ledger without navigating away</p>
                     </div>
                   </div>
-                  <button 
-                    onClick={() => {
-                        const finalSrNo = getNextSrNo();
-                        const newRec: any = {
-                          id: crypto.randomUUID(),
-                          srNo: finalSrNo,
-                          name: fullQuickAdd.name,
-                          studentClass: fullQuickAdd.studentClass,
-                          items: fullQuickAdd.selectedItems,
-                          totalAmount: Number(fullQuickAdd.totalAmount) || 0,
-                          discountPercent: Number(fullQuickAdd.discountPercent) || 0,
-                          paidAmount: Number(fullQuickAdd.paidAmount) || 0,
-                          paymentMode: fullQuickAdd.paymentMode,
-                          date: new Date(fullQuickAdd.date).toLocaleDateString('en-IN'),
-                          paymentDate: fullQuickAdd.paymentMode !== 'Pending' ? new Date(fullQuickAdd.paymentDate).toLocaleDateString('en-IN') : null,
-                          timestamp: new Date().toISOString(),
-                          notes: fullQuickAdd.notes,
-                          customData: fullQuickAdd.customData || {}
-                        };
-                        addRecord(newRec);
-                        setFullQuickAdd({
-                          date: new Date().toISOString().split('T')[0],
-                          name: '',
-                          studentClass: CLASSES[0],
-                          paymentMode: 'Pending',
-                          totalAmount: '',
-                          paidAmount: '',
-                          discountPercent: '0',
-                          paymentDate: new Date().toISOString().split('T')[0],
-                          notes: '',
-                          selectedItems: [],
-                          customData: {}
-                        });
-                        setShowQuickForm(false);
-                        setMsg({ type: 'success', text: `Direct Post #${finalSrNo} Successful` });
-                    }}
-                    disabled={!fullQuickAdd.name || !fullQuickAdd.totalAmount}
-                    className="px-6 py-3 bg-blue-600 text-white rounded-2xl text-[10px] font-black uppercase tracking-[0.2em] hover:bg-blue-700 transition-all shadow-xl shadow-blue-500/20 disabled:opacity-30 disabled:grayscale active:scale-95"
-                  >
-                    Post Record #{getNextSrNo()}
-                  </button>
+                  
+                  {/* Tab Selector */}
+                  <div className="flex p-1 bg-slate-100/85 rounded-xl border border-slate-200 self-start md:self-auto shrink-0 shadow-sm">
+                    <button
+                      type="button"
+                      onClick={() => setQuickFormTab('basic')}
+                      className={`px-4 py-1.5 rounded-lg text-xs font-black uppercase tracking-wider transition-all duration-200 ${quickFormTab === 'basic' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                    >
+                      Basic Fast Sale
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setQuickFormTab('advanced')}
+                      className={`px-4 py-1.5 rounded-lg text-xs font-black uppercase tracking-wider transition-all duration-200 ${quickFormTab === 'advanced' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                    >
+                      Advanced Multi-Item
+                    </button>
+                  </div>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                  {/* Basic Info */}
-                  <div className="space-y-4">
+                {quickFormTab === 'basic' ? (
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    {/* Basic Column 1: Student Details */}
+                    <div className="space-y-4 bg-white p-5 rounded-2xl border border-blue-100 shadow-sm">
+                      <h4 className="text-[10px] font-black text-blue-600 uppercase tracking-widest border-b border-slate-100 pb-2">1. Student Details</h4>
+                      
+                      {/* Name */}
+                      <div className="space-y-1.5">
+                        <div className="flex items-center justify-between px-1">
+                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Student Name</label>
+                          {basicSale.name && allRecords.some((r: any) => r.name.trim().toLowerCase() === basicSale.name.trim().toLowerCase()) && (
+                            <span className="text-[8px] font-black text-amber-600 animate-pulse flex items-center gap-1 uppercase tracking-widest">
+                              <AlertCircle size={10} /> Name Exists
+                            </span>
+                          )}
+                        </div>
+                        <div className="relative">
+                          <UserCircle className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                          <input 
+                            type="text"
+                            placeholder="EX: VISHAL D."
+                            className={`w-full h-11 pl-10 pr-4 bg-slate-50 border rounded-xl outline-none focus:border-blue-500 text-xs font-bold transition-all shadow-sm ${basicSale.name && allRecords.some((r: any) => r.name.trim().toLowerCase() === basicSale.name.trim().toLowerCase()) ? 'border-amber-300 focus:ring-4 focus:ring-amber-50' : 'border-slate-200'}`}
+                            value={basicSale.name}
+                            onChange={(e) => setBasicSale((p: any) => ({ ...p, name: e.target.value.toUpperCase() }))}
+                          />
+                        </div>
+                      </div>
+
+                      {/* Class and date */}
+                      <div className="grid grid-cols-2 gap-4">
+                        <div className="space-y-1.5">
+                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Class</label>
+                          <div className="relative">
+                            <Layout className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                            <select 
+                              className="w-full h-11 pl-10 pr-8 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-bold appearance-none transition-all shadow-sm cursor-pointer"
+                              value={basicSale.studentClass}
+                              onChange={(e) => setBasicSale((p: any) => ({ ...p, studentClass: e.target.value }))}
+                            >
+                              {CLASSES.map((c: string) => <option key={c} value={c}>{c}</option>)}
+                            </select>
+                            <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-300 pointer-events-none" size={14} />
+                          </div>
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Sale Date</label>
+                          <div className="relative">
+                            <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                            <input 
+                              type="date"
+                              className="w-full h-11 pl-10 pr-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-bold transition-all shadow-sm"
+                              value={basicSale.date}
+                              onChange={(e) => setBasicSale((p: any) => ({ ...p, date: e.target.value }))}
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Custom Fields */}
+                      {customFields && customFields.length > 0 && (
+                        <div className="space-y-3 pt-2 border-t border-slate-100">
+                          <h5 className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Custom Metadata</h5>
+                          <div className="grid grid-cols-2 gap-3">
+                            {customFields.map((f: any) => (
+                              <div key={f.id} className="space-y-1">
+                                <label className="text-[10px] font-black text-slate-500 uppercase ml-1 flex items-center gap-1">
+                                  {f.label}
+                                  {f.required && <span className="text-red-500">*</span>}
+                                </label>
+                                <input 
+                                  type={f.type === 'number' ? 'number' : f.type === 'date' ? 'date' : 'text'}
+                                  placeholder={`Enter ${f.label}...`}
+                                  className="w-full h-10 px-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-bold transition-all shadow-sm"
+                                  value={basicSale.customData?.[f.id] || ''}
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    setBasicSale((p: any) => ({
+                                      ...p,
+                                      customData: { ...p.customData, [f.id]: val }
+                                    }));
+                                  }}
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Basic Column 2: Single-Item Selection */}
+                    <div className="space-y-4 bg-white p-5 rounded-2xl border border-blue-100 shadow-sm flex flex-col justify-start">
+                      <h4 className="text-[10px] font-black text-blue-600 uppercase tracking-widest border-b border-slate-100 pb-2">2. Single-Item Selection</h4>
+                      
+                      {/* Product select */}
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Product Name</label>
+                        <select 
+                          className="w-full h-11 px-3 bg-slate-50 border border-slate-200 rounded-xl outline-none text-xs font-bold transition-all"
+                          value={basicSale.product}
+                          onChange={(e) => handleBasicProductChange(e.target.value)}
+                        >
+                          <option value="">Select product...</option>
+                          {itemNames.map(name => <option key={name} value={name}>{name}</option>)}
+                        </select>
+                      </div>
+
+                      {/* Size select */}
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Size & Details</label>
+                        <select 
+                          disabled={!basicSale.product}
+                          className="w-full h-11 px-3 bg-slate-50 border border-slate-200 rounded-xl outline-none text-xs font-bold transition-all disabled:opacity-50 pointer-events-auto cursor-pointer"
+                          value={basicSale.size}
+                          onChange={(e) => handleBasicSizeChange(e.target.value)}
+                        >
+                          {basicSale.product ? (
+                            <>
+                              <option value="">Select size...</option>
+                              {Object.entries(pricing[basicSale.product] || {}).map(([sz, details]: any) => (
+                                <option key={sz} value={sz}>
+                                  {sz} (₹{details.price || 0}) {details.stock !== undefined ? `- ${details.stock} left` : ''}
+                                </option>
+                              ))}
+                            </>
+                          ) : (
+                            <option value="">Select product first...</option>
+                          )}
+                        </select>
+                      </div>
+
+                      {/* Quantity Selector with Custom +/- */}
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1 block">Quantity</label>
+                        <div className="flex items-center h-11 bg-slate-50 border border-slate-200 rounded-xl overflow-hidden">
+                          <button
+                            type="button"
+                            disabled={!basicSale.product || basicSale.qty <= 1}
+                            onClick={() => handleBasicQtyChange(basicSale.qty - 1)}
+                            className="w-12 h-full flex items-center justify-center text-slate-500 hover:bg-slate-100 transition-colors disabled:opacity-30 border-r border-slate-200"
+                          >
+                            <Minus size={14} strokeWidth={3} />
+                          </button>
+                          <input
+                            type="number"
+                            disabled={!basicSale.product}
+                            min="1"
+                            className="flex-1 w-full text-center font-mono font-extrabold text-sm text-slate-800 outline-none bg-transparent"
+                            value={basicSale.qty}
+                            onChange={(e) => handleBasicQtyChange(Number(e.target.value) || 1)}
+                          />
+                          <button
+                            type="button"
+                            disabled={!basicSale.product}
+                            onClick={() => handleBasicQtyChange(basicSale.qty + 1)}
+                            className="w-12 h-full flex items-center justify-center text-slate-500 hover:bg-slate-100 transition-colors disabled:opacity-30 border-l border-slate-200"
+                          >
+                            <Plus size={14} strokeWidth={3} />
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Rate and stock banner */}
+                      {basicSale.product && basicSale.size && pricing[basicSale.product]?.[basicSale.size] && (
+                        <div className="mt-2 p-2.5 bg-blue-50/55 border border-blue-100 rounded-xl text-[10px] font-bold text-slate-500 flex justify-between items-center">
+                          <span>Base Rate: ₹{pricing[basicSale.product][basicSale.size].price || 0}</span>
+                          {basicSale.qty > (pricing[basicSale.product][basicSale.size].stock || 0) ? (
+                            <span className="text-red-500 font-extrabold animate-pulse">⚠️ Stock limit exceeded ({pricing[basicSale.product][basicSale.size].stock} left)</span>
+                          ) : (
+                            <span className="text-emerald-600 font-black">✓ Stock Available ({pricing[basicSale.product][basicSale.size].stock})</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Basic Column 3: Summary & Submit */}
+                    <div className="space-y-4 bg-white p-5 rounded-2xl border border-blue-100 shadow-sm flex flex-col justify-between">
+                      <div className="space-y-4">
+                        <h4 className="text-[10px] font-black text-blue-600 uppercase tracking-widest border-b border-slate-100 pb-2">3. Payment Mode & Confirm</h4>
+                        
+                        {/* Selector mode */}
+                        <div className="space-y-1.5">
+                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Payment Method</label>
+                          <div className="relative">
+                            <CreditCard className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                            <select 
+                              className="w-full h-11 pl-10 pr-8 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-bold appearance-none transition-all shadow-sm cursor-pointer"
+                              value={basicSale.paymentMode}
+                              onChange={(e) => handleBasicPaymentModeChange(e.target.value)}
+                            >
+                              <option value="Pending">Pending / Credit</option>
+                              <option value="UPI">UPI Digital</option>
+                              <option value="Cash">Cash Hardcopy</option>
+                            </select>
+                            <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-300 pointer-events-none" size={14} />
+                          </div>
+                        </div>
+
+                        {/* Paid Amount */}
+                        <div className="space-y-1.5">
+                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Paid Amount</label>
+                          <div className="relative">
+                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs font-bold">₹</span>
+                            <input 
+                              type="number"
+                              disabled={basicSale.paymentMode === 'Pending'}
+                              placeholder="0.00"
+                              className="w-full h-11 pl-8 pr-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-black transition-all shadow-sm font-mono disabled:opacity-50"
+                              value={basicSale.paidAmount}
+                              onChange={(e) => setBasicSale((p: any) => ({ ...p, paidAmount: e.target.value }))}
+                            />
+                          </div>
+                        </div>
+
+                        {/* Notes */}
+                        <div className="space-y-1.5">
+                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Transaction Notes</label>
+                          <textarea 
+                            placeholder="Any comments, balance dates..."
+                            className="w-full h-16 px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-medium transition-all shadow-sm resize-none"
+                            value={basicSale.notes}
+                            onChange={(e) => setBasicSale((p: any) => ({ ...p, notes: e.target.value }))}
+                          />
+                        </div>
+                      </div>
+
+                      {/* Final Submitter */}
+                      <div className="pt-4 border-t border-slate-100 flex flex-col gap-3">
+                        <div className="flex justify-between items-center text-xs font-black text-slate-700 font-mono">
+                          <span>TOTAL AMOUNT:</span>
+                          <span className="text-lg text-blue-600 font-black">₹{((pricing[basicSale.product]?.[basicSale.size]?.price || 0) * basicSale.qty).toFixed(1)}</span>
+                        </div>
+                        
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const productRate = pricing[basicSale.product]?.[basicSale.size]?.price || 0;
+                            const currentSum = productRate * basicSale.qty;
+                            const finalSr = getNextSrNo();
+                            
+                            const newRec: any = {
+                              id: crypto.randomUUID(),
+                              srNo: finalSr,
+                              name: basicSale.name.trim().toUpperCase(),
+                              studentClass: basicSale.studentClass,
+                              items: [
+                                {
+                                  id: crypto.randomUUID(),
+                                  item: basicSale.product,
+                                  size: basicSale.size,
+                                  qty: basicSale.qty,
+                                  rate: productRate
+                                }
+                              ],
+                              totalAmount: currentSum,
+                              discountPercent: 0,
+                              paidAmount: basicSale.paymentMode === 'Pending' ? 0 : Number(basicSale.paidAmount) || 0,
+                              paymentMode: basicSale.paymentMode,
+                              date: new Date(basicSale.date).toLocaleDateString('en-IN'),
+                              paymentDate: basicSale.paymentMode !== 'Pending' ? new Date(basicSale.date).toLocaleDateString('en-IN') : null,
+                              timestamp: new Date().toISOString(),
+                              notes: basicSale.notes || 'Basic Quick Sale Entry',
+                              customData: basicSale.customData || {}
+                            };
+
+                            try {
+                              addRecord(newRec);
+                              setMsg({ type: 'success', text: `Fast Sale #${finalSr} Posted Successfully!` });
+                              setBasicSale((p: any) => ({
+                                ...p,
+                                name: '',
+                                qty: 1,
+                                notes: '',
+                                customData: {}
+                              }));
+                              setShowQuickForm(false);
+                            } catch (err: any) {
+                              setMsg({ type: 'error', text: `Failed to post sale: ${err.message}` });
+                            }
+                          }}
+                          disabled={!basicSale.name || !basicSale.product || !basicSale.size}
+                          className="w-full py-3.5 bg-blue-600 text-white font-black text-xs uppercase tracking-[0.2em] rounded-xl hover:bg-blue-700 disabled:opacity-30 disabled:grayscale transition-all shadow-lg shadow-blue-500/10 active:scale-95 flex items-center justify-center gap-2 cursor-pointer"
+                        >
+                          <CheckCircle2 size={16} /> Post Fast Sale
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                  {/* Column 1: Basic & Custom Info */}
+                  <div className="space-y-4 bg-white p-5 rounded-2xl border border-blue-100 shadow-sm">
+                    <h4 className="text-[10px] font-black text-blue-600 uppercase tracking-widest border-b border-slate-100 pb-2">1. Student Details</h4>
+                    
                     <div className="space-y-1.5">
                       <div className="flex items-center justify-between px-1">
                         <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Student Name</label>
@@ -7104,21 +8633,22 @@ function LedgerSection({
                         <input 
                           type="text"
                           placeholder="EX: VISHAL D."
-                          className={`w-full h-11 pl-10 pr-4 bg-white border rounded-xl outline-none focus:border-blue-500 text-xs font-bold transition-all shadow-sm ${fullQuickAdd.name && allRecords.some((r: any) => r.name.trim().toLowerCase() === fullQuickAdd.name.trim().toLowerCase()) ? 'border-amber-300' : 'border-slate-200'}`}
+                          className={`w-full h-11 pl-10 pr-4 bg-slate-50 border rounded-xl outline-none focus:border-blue-500 text-xs font-bold transition-all shadow-sm ${fullQuickAdd.name && allRecords.some((r: any) => r.name.trim().toLowerCase() === fullQuickAdd.name.trim().toLowerCase()) ? 'border-amber-300 focus:ring-4 focus:ring-amber-50' : 'border-slate-200'}`}
                           value={fullQuickAdd.name}
-                          onChange={(e) => setFullQuickAdd(p => ({ ...p, name: e.target.value.toUpperCase() }))}
+                          onChange={(e) => setFullQuickAdd((p: any) => ({ ...p, name: e.target.value.toUpperCase() }))}
                         />
                       </div>
                     </div>
+
                     <div className="grid grid-cols-2 gap-4">
                       <div className="space-y-1.5">
                         <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Class</label>
                         <div className="relative">
                           <Layout className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
                           <select 
-                            className="w-full h-11 pl-10 pr-8 bg-white border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-bold appearance-none transition-all shadow-sm"
+                            className="w-full h-11 pl-10 pr-8 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-bold appearance-none transition-all shadow-sm"
                             value={fullQuickAdd.studentClass}
-                            onChange={(e) => setFullQuickAdd(p => ({ ...p, studentClass: e.target.value }))}
+                            onChange={(e) => setFullQuickAdd((p: any) => ({ ...p, studentClass: e.target.value }))}
                           >
                             {CLASSES.map(c => <option key={c} value={c}>{c}</option>)}
                           </select>
@@ -7131,203 +8661,342 @@ function LedgerSection({
                           <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
                           <input 
                             type="date"
-                            className="w-full h-11 pl-10 pr-3 bg-white border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-bold transition-all shadow-sm"
+                            className="w-full h-11 pl-10 pr-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-bold transition-all shadow-sm"
                             value={fullQuickAdd.date}
-                            onChange={(e) => setFullQuickAdd(p => ({ ...p, date: e.target.value }))}
+                            onChange={(e) => setFullQuickAdd((p: any) => ({ ...p, date: e.target.value }))}
                           />
                         </div>
                       </div>
-                    </div>
-                  </div>
-
-                  {/* Payment Details */}
-                  <div className="space-y-4">
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="space-y-1.5">
-                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Grand Total</label>
-                        <div className="relative">
-                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 font-bold text-xs">₹</span>
-                          <input 
-                            type="number"
-                            placeholder="0.00"
-                            className="w-full h-11 pl-8 pr-4 bg-white border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-black transition-all shadow-sm font-mono"
-                            value={fullQuickAdd.totalAmount}
-                            onChange={(e) => setFullQuickAdd(p => ({ ...p, totalAmount: e.target.value }))}
-                          />
-                          {fullQuickAdd.selectedItems.length > 0 && (
-                            <button 
-                                onClick={() => {
-                                    const calcTotal = fullQuickAdd.selectedItems.reduce((s, i) => s + (i.qty * i.rate), 0);
-                                    setFullQuickAdd(p => ({ ...p, totalAmount: calcTotal.toString() }));
-                                }}
-                                className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 bg-blue-50 text-blue-600 rounded-lg text-[8px] font-black hover:bg-blue-600 hover:text-white transition-all uppercase"
-                            >
-                                Auto
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                      <div className="space-y-1.5">
-                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Discount %</label>
-                        <div className="relative">
-                          <Tag className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
-                          <input 
-                            type="number"
-                            placeholder="0"
-                            className="w-full h-11 pl-10 pr-4 bg-white border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-black transition-all shadow-sm font-mono"
-                            value={fullQuickAdd.discountPercent}
-                            onChange={(e) => setFullQuickAdd(p => ({ ...p, discountPercent: e.target.value }))}
-                          />
-                        </div>
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="space-y-1.5">
-                        <div className="flex justify-between items-center px-1">
-                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Paid Amount</label>
-                          {fullQuickAdd.totalAmount && (
-                            <span className="text-[8px] font-black text-red-500 uppercase tracking-tighter">
-                              BAL: ₹{Math.max(0, (Number(fullQuickAdd.totalAmount) * (1 - (Number(fullQuickAdd.discountPercent) || 0) / 100)) - (Number(fullQuickAdd.paidAmount) || 0)).toFixed(0)}
-                            </span>
-                          )}
-                        </div>
-                        <div className="relative">
-                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 font-bold text-xs">₹</span>
-                          <input 
-                            type="number"
-                            placeholder="0.00"
-                            className="w-full h-11 pl-8 pr-4 bg-white border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-black transition-all shadow-sm font-mono"
-                            value={fullQuickAdd.paidAmount}
-                            onChange={(e) => setFullQuickAdd(p => ({ ...p, paidAmount: e.target.value }))}
-                          />
-                        </div>
-                      </div>
-                      <div className="space-y-1.5">
-                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Mode</label>
-                        <div className="relative">
-                          <CreditCard className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
-                          <select 
-                            className="w-full h-11 pl-10 pr-8 bg-white border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-bold appearance-none transition-all shadow-sm"
-                            value={fullQuickAdd.paymentMode}
-                            onChange={(e) => {
-                                const mode = e.target.value;
-                                setFullQuickAdd(p => ({ 
-                                    ...p, 
-                                    paymentMode: mode,
-                                    paidAmount: mode === 'Pending' ? '0' : (p.paidAmount || p.totalAmount)
-                                }));
-                            }}
-                          >
-                            <option value="Pending">Pending</option>
-                            <option value="UPI">UPI</option>
-                            <option value="Cash">Cash</option>
-                          </select>
-                          <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-300" size={14} />
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Items Entry */}
-                  <div className="space-y-4 lg:col-span-2">
-                    <div className="flex justify-between items-center px-1">
-                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Cart Items (Optional for fast entry)</label>
-                        <span className="text-[9px] font-bold text-blue-600 bg-blue-100 px-2 py-0.5 rounded-full">{fullQuickAdd.selectedItems.length} Added</span>
                     </div>
 
                     {/* Custom Fields Row if exist */}
                     {customFields && customFields.length > 0 && (
-                        <div className="grid grid-cols-2 gap-4 mb-2">
-                            {customFields.map((f: any) => (
-                                <div key={f.id} className="space-y-1.5">
-                                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">{f.label}</label>
-                                    <input 
-                                        type="text"
-                                        placeholder={`Enter ${f.label}...`}
-                                        className="w-full h-11 px-4 bg-white border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-bold transition-all shadow-sm"
-                                        value={(fullQuickAdd as any).customData?.[f.id] || ''}
-                                        onChange={(e) => {
-                                            const val = e.target.value;
-                                            setFullQuickAdd(p => ({
-                                                ...p,
-                                                customData: { ...(p as any).customData, [f.id]: val }
-                                            }));
-                                        }}
-                                    />
-                                </div>
-                            ))}
+                      <div className="space-y-3 pt-2 border-t border-slate-100">
+                        <h5 className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Custom Metadata</h5>
+                        <div className="grid grid-cols-2 gap-3">
+                          {customFields.map((f: any) => (
+                            <div key={f.id} className="space-y-1">
+                              <label className="text-[10px] font-black text-slate-500 uppercase ml-1 flex items-center gap-1">
+                                {f.label}
+                                {f.required && <span className="text-red-500">*</span>}
+                              </label>
+                              <input 
+                                type={f.type === 'number' ? 'number' : f.type === 'date' ? 'date' : 'text'}
+                                placeholder={`Enter ${f.label}...`}
+                                className="w-full h-10 px-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-bold transition-all shadow-sm"
+                                value={(fullQuickAdd as any).customData?.[f.id] || ''}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setFullQuickAdd((p: any) => ({
+                                    ...p,
+                                    customData: { ...p.customData, [f.id]: val }
+                                  }));
+                                }}
+                              />
+                            </div>
+                          ))}
                         </div>
+                      </div>
                     )}
+                  </div>
 
-                    <div className="flex gap-2">
-                        <select 
-                            id="quick-item-select"
-                            className="flex-1 h-11 px-4 bg-white border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-bold transition-all shadow-sm"
-                            defaultValue=""
-                            onChange={(e) => {
-                                const itemName = e.target.value;
-                                if (!itemName) return;
-                                // Automatically add the first size for speed
-                                const sizes = Object.keys(pricing[itemName] || {});
-                                if (sizes.length > 0) {
-                                    const firstSize = sizes[0];
-                                    const rate = pricing[itemName][firstSize].price || 0;
-                                    setFullQuickAdd(p => {
-                                        const exists = p.selectedItems.find(i => i.item === itemName && i.size === firstSize);
-                                        if (exists) {
-                                            return {
-                                                ...p,
-                                                selectedItems: p.selectedItems.map(i => (i.item === itemName && i.size === firstSize) ? { ...i, qty: i.qty + 1 } : i)
-                                            };
-                                        }
-                                        return {
-                                            ...p,
-                                            selectedItems: [...p.selectedItems, { item: itemName, size: firstSize, qty: 1, rate }]
-                                        };
-                                    });
-                                }
-                                e.target.value = "";
-                            }}
-                        >
-                            <option value="" disabled>+ Add Item to Record...</option>
-                            {itemNames.map(name => <option key={name} value={name}>{name}</option>)}
-                        </select>
-                        <textarea 
-                            placeholder="Add internal notes..."
-                            className="flex-1 h-11 px-4 py-3 bg-white border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-bold transition-all shadow-sm resize-none"
-                            value={fullQuickAdd.notes}
-                            onChange={(e) => setFullQuickAdd(p => ({ ...p, notes: e.target.value }))}
-                        />
-                    </div>
+                  {/* Column 2: Interactive Inventory Cart Builder */}
+                  <div className="space-y-4 bg-white p-5 rounded-2xl border border-blue-100 shadow-sm flex flex-col">
+                    <h4 className="text-[10px] font-black text-blue-600 uppercase tracking-widest border-b border-slate-100 pb-2">2. Items Configuration</h4>
                     
-                    {/* Cart Preview */}
-                    <div className="flex flex-wrap gap-2 max-h-[60px] overflow-y-auto custom-scroll">
-                        {fullQuickAdd.selectedItems.map((item, idx) => (
-                            <div key={idx} className="flex items-center gap-2 bg-white border border-blue-100 pl-3 pr-1 py-1 rounded-xl shadow-sm text-[10px] font-black uppercase group">
-                                <span className="text-slate-900">{item.item}</span>
-                                <span className="text-blue-600">[{item.size}]</span>
-                                <span className="px-2 bg-blue-50 text-blue-700 rounded-lg">{item.qty}</span>
-                                <button 
-                                    onClick={() => setFullQuickAdd(p => ({ ...p, selectedItems: p.selectedItems.filter((_, i) => i !== idx) }))}
-                                    className="p-1 hover:bg-red-50 hover:text-red-600 text-slate-300 transition-colors rounded-lg"
+                    {/* Integrated Selector */}
+                    <div className="p-3.5 bg-slate-50/50 border border-slate-200/60 rounded-xl space-y-3">
+                      <div className="grid grid-cols-2 gap-2">
+                        {/* Item Name Select */}
+                        <div className="space-y-1">
+                          <label className="text-[9px] font-black text-slate-400 uppercase px-1">Product</label>
+                          <select 
+                            className="w-full h-10 px-3 bg-white border border-slate-200 rounded-xl outline-none text-xs font-bold transition-all"
+                            value={quickAddProduct}
+                            onChange={(e) => handleQuickAddProductChange(e.target.value)}
+                          >
+                            <option value="">+ Select Item</option>
+                            {itemNames.map(name => <option key={name} value={name}>{name}</option>)}
+                          </select>
+                        </div>
+
+                        {/* Size Select */}
+                        <div className="space-y-1">
+                          <label className="text-[9px] font-black text-slate-400 uppercase px-1">Size & Price</label>
+                          <select 
+                            disabled={!quickAddProduct}
+                            className="w-full h-10 px-3 bg-white border border-slate-200 rounded-xl outline-none text-xs font-bold transition-all disabled:opacity-50"
+                            value={quickAddSize}
+                            onChange={(e) => setQuickAddSize(e.target.value)}
+                          >
+                            {quickAddProduct ? (
+                              Object.entries(pricing[quickAddProduct] || {}).map(([sz, details]: any) => (
+                                <option key={sz} value={sz}>
+                                  {sz} (₹{details.price || 0}) {details.stock !== undefined ? `- ${details.stock} left` : ''}
+                                </option>
+                              ))
+                            ) : (
+                              <option value="">Select size...</option>
+                            )}
+                          </select>
+                        </div>
+                      </div>
+
+                      {/* Quantity Selector & Add Button */}
+                      <div className="flex gap-2 items-end pt-1">
+                        <div className="flex-1 space-y-1">
+                          <label className="text-[9px] font-black text-slate-400 uppercase px-1 block">Qty</label>
+                          <div className="flex items-center h-10 bg-white border border-slate-200 rounded-xl overflow-hidden">
+                            <button
+                              type="button"
+                              disabled={!quickAddProduct || quickAddQty <= 1}
+                              onClick={() => handleStepQty('down')}
+                              className="w-10 h-full flex items-center justify-center text-slate-500 hover:bg-slate-50 transition-colors disabled:opacity-30 border-r border-slate-100"
+                            >
+                              <Minus size={12} strokeWidth={3} />
+                            </button>
+                            <input
+                              type="number"
+                              disabled={!quickAddProduct}
+                              min="1"
+                              className="flex-1 w-full text-center font-mono font-extrabold text-xs text-slate-800 outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                              value={quickAddQty}
+                              onChange={(e) => setQuickAddQty(Math.max(1, Number(e.target.value) || 1))}
+                            />
+                            <button
+                              type="button"
+                              disabled={!quickAddProduct}
+                              onClick={() => handleStepQty('up')}
+                              className="w-10 h-full flex items-center justify-center text-slate-500 hover:bg-slate-50 transition-colors disabled:opacity-30 border-l border-slate-100"
+                            >
+                              <Plus size={12} strokeWidth={3} />
+                            </button>
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          disabled={!quickAddProduct || !quickAddSize}
+                          onClick={addProductToQuickCart}
+                          className="px-4 h-10 bg-blue-600 text-white font-black text-[10px] uppercase tracking-wider rounded-xl hover:bg-blue-700 transition-all flex items-center justify-center gap-1.5 shadow-md shadow-blue-500/10 active:scale-95 disabled:opacity-30 disabled:pointer-events-none"
+                        >
+                          <Plus size={14} strokeWidth={3} /> ADD
+                        </button>
+                      </div>
+
+                      {/* Stock Alerts inside Selector */}
+                      {quickAddProduct && quickAddSize && pricing[quickAddProduct]?.[quickAddSize]?.stock !== undefined && (
+                        <div className="text-[9px] font-bold px-1 flex justify-between items-center text-slate-500">
+                          <span>Rate: ₹{pricing[quickAddProduct][quickAddSize].price || 0}</span>
+                          {quickAddQty > (pricing[quickAddProduct][quickAddSize].stock || 0) ? (
+                            <span className="text-red-500 animate-pulse font-extrabold uppercase">⚠️ Insufficient Stock ({pricing[quickAddProduct][quickAddSize].stock} available)</span>
+                          ) : (
+                            <span className="text-emerald-500">Stock OK</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Shopping Cart List */}
+                    <div className="flex-1 flex flex-col min-h-[140px] max-h-[220px]">
+                      <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1.5 block">Attached Cart List ({fullQuickAdd.selectedItems.length})</span>
+                      <div className="flex-1 overflow-y-auto custom-scroll space-y-2 border border-dashed border-slate-200 rounded-xl p-3 bg-slate-50/20">
+                        {fullQuickAdd.selectedItems.map((item: any, idx: number) => {
+                          const itemTotal = item.qty * item.rate;
+                          return (
+                            <div key={idx} className="flex items-center justify-between bg-white border border-slate-200/80 p-2.5 rounded-xl shadow-sm transition-all hover:border-blue-100">
+                              <div className="space-y-0.5 min-w-0 pr-2">
+                                <div className="text-[10px] font-black text-slate-800 truncate uppercase">{item.item}</div>
+                                <div className="flex items-center gap-1.5 text-[8px] text-slate-400 font-extrabold uppercase">
+                                  <span className="bg-slate-100 text-slate-600 px-1 py-0.2 rounded font-mono">{item.size}</span>
+                                  <span>@ ₹{item.rate}</span>
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-3 shrink-0">
+                                {/* Inline Stepper */}
+                                <div className="flex items-center bg-slate-50 rounded-lg border border-slate-200 h-7 overflow-hidden">
+                                  <button
+                                    type="button"
+                                    onClick={() => adjustQuickCartItemQty(idx, -1)}
+                                    className="w-6 h-full flex items-center justify-center text-slate-500 hover:bg-slate-100"
+                                  >
+                                    <Minus size={10} strokeWidth={3} />
+                                  </button>
+                                  <span className="px-2 font-mono font-black text-xs text-slate-700">{item.qty}</span>
+                                  <button
+                                    type="button"
+                                    onClick={() => adjustQuickCartItemQty(idx, 1)}
+                                    className="w-6 h-full flex items-center justify-center text-slate-500 hover:bg-slate-100"
+                                  >
+                                    <Plus size={10} strokeWidth={3} />
+                                  </button>
+                                </div>
+                                <span className="font-mono text-xs font-black text-slate-700 min-w-[50px] text-right">₹{itemTotal}</span>
+                                <button
+                                  type="button"
+                                  onClick={() => adjustQuickCartItemQty(idx, -item.qty)}
+                                  className="p-1 hover:bg-red-50 hover:text-red-600 text-slate-300 transition-colors rounded-lg"
                                 >
-                                    <X size={10} />
+                                  <Trash2 size={12} />
                                 </button>
+                              </div>
                             </div>
-                        ))}
+                          );
+                        })}
                         {fullQuickAdd.selectedItems.length === 0 && (
-                            <div className="w-full text-center py-2 text-[9px] font-bold text-slate-400 uppercase tracking-widest italic border border-dashed border-slate-200 rounded-xl">
-                                No items attached (Total Amount is required)
-                            </div>
+                          <div className="h-full flex flex-col items-center justify-center py-8 text-center text-[10px] font-bold text-slate-400 uppercase tracking-wider italic">
+                            <PlusCircle size={24} className="text-slate-300 mb-1.5 stroke-1" />
+                            Use widget above to add items
+                          </div>
                         )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Column 3: Payment & Post To Ledger */}
+                  <div className="space-y-4 bg-white p-5 rounded-2xl border border-blue-100 shadow-sm flex flex-col justify-between">
+                    <div className="space-y-4">
+                      <h4 className="text-[10px] font-black text-blue-600 uppercase tracking-widest border-b border-slate-100 pb-2">3. Subtotals & Payment</h4>
+
+                      <div className="grid grid-cols-2 gap-3">
+                        {/* Grand Total */}
+                        <div className="space-y-1.5">
+                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Grand Total</label>
+                          <div className="relative">
+                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 font-bold text-xs">₹</span>
+                            <input 
+                              type="number"
+                              placeholder="0.00"
+                              className="w-full h-10 pl-8 pr-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:border-blue-500 hover:bg-white focus:bg-white text-xs font-black transition-all shadow-sm font-mono"
+                              value={fullQuickAdd.totalAmount}
+                              onChange={(e) => handleQuickAddTotalChange(e.target.value)}
+                            />
+                          </div>
+                        </div>
+
+                        {/* Discount % */}
+                        <div className="space-y-1.5">
+                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Discount %</label>
+                          <div className="relative">
+                            <Tag className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={12} />
+                            <input 
+                              type="number"
+                              placeholder="0"
+                              min="0"
+                              max="100"
+                              className="w-full h-10 pl-8 pr-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:border-blue-500 hover:bg-white focus:bg-white text-xs font-black transition-all shadow-sm font-mono"
+                              value={fullQuickAdd.discountPercent}
+                              onChange={(e) => handleQuickAddDiscountChange(e.target.value)}
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-3">
+                        {/* Paid Amount */}
+                        <div className="space-y-1.5">
+                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Paid Amount</label>
+                          <div className="relative">
+                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 font-bold text-xs">₹</span>
+                            <input 
+                              type="number"
+                              placeholder="0.00"
+                              className="w-full h-10 pl-8 pr-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:border-blue-500 hover:bg-white focus:bg-white text-xs font-black transition-all shadow-sm font-mono"
+                              value={fullQuickAdd.paidAmount}
+                              onChange={(e) => setFullQuickAdd((p: any) => ({ ...p, paidAmount: e.target.value }))}
+                            />
+                          </div>
+                        </div>
+
+                        {/* Mode */}
+                        <div className="space-y-1.5">
+                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Mode</label>
+                          <div className="relative">
+                            <CreditCard className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={12} />
+                            <select 
+                              className="w-full h-10 pl-8 pr-8 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:border-blue-500 text-xs font-bold appearance-none transition-all shadow-sm"
+                              value={fullQuickAdd.paymentMode}
+                              onChange={(e) => handleQuickAddModeChange(e.target.value)}
+                            >
+                              <option value="Pending">Pending</option>
+                              <option value="UPI">UPI</option>
+                              <option value="Cash">Cash</option>
+                            </select>
+                            <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-300" size={12} />
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Balance & Status Banner */}
+                      <div className="p-3 bg-slate-50 rounded-xl flex items-center justify-between font-mono text-[10px] font-black text-slate-600">
+                        <span>PAYABLE: ₹{(Number(fullQuickAdd.totalAmount) * (1 - (Number(fullQuickAdd.discountPercent) || 0) / 100)).toFixed(1)}</span>
+                        <span className={(Number(fullQuickAdd.totalAmount) * (1 - (Number(fullQuickAdd.discountPercent) || 0) / 100) - Number(fullQuickAdd.paidAmount) > 0) ? 'text-orange-600' : 'text-emerald-600'}>
+                          DUE: ₹{Math.max(0, (Number(fullQuickAdd.totalAmount) * (1 - (Number(fullQuickAdd.discountPercent) || 0) / 100)) - (Number(fullQuickAdd.paidAmount) || 0)).toFixed(1)}
+                        </span>
+                      </div>
+
+                      {/* Internal Notes */}
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Internal Notes</label>
+                        <textarea 
+                          placeholder="Add receipt info, remarks..."
+                          className="w-full h-16 px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:border-blue-500 hover:bg-white focus:bg-white text-xs font-medium transition-all shadow-sm resize-none"
+                          value={fullQuickAdd.notes}
+                          onChange={(e) => setFullQuickAdd((p: any) => ({ ...p, notes: e.target.value }))}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="pt-3">
+                      <button 
+                        onClick={() => {
+                          const finalSrNo = getNextSrNo();
+                          const newRec: any = {
+                            id: crypto.randomUUID(),
+                            srNo: finalSrNo,
+                            name: fullQuickAdd.name,
+                            studentClass: fullQuickAdd.studentClass,
+                            items: fullQuickAdd.selectedItems,
+                            totalAmount: Number(fullQuickAdd.totalAmount) || 0,
+                            discountPercent: Number(fullQuickAdd.discountPercent) || 0,
+                            paidAmount: Number(fullQuickAdd.paidAmount) || 0,
+                            paymentMode: fullQuickAdd.paymentMode,
+                            date: new Date(fullQuickAdd.date).toLocaleDateString('en-IN'),
+                            paymentDate: fullQuickAdd.paymentMode !== 'Pending' ? new Date(fullQuickAdd.paymentDate).toLocaleDateString('en-IN') : null,
+                            timestamp: new Date().toISOString(),
+                            notes: fullQuickAdd.notes,
+                            customData: fullQuickAdd.customData || {}
+                          };
+                          addRecord(newRec);
+                          setFullQuickAdd({
+                            date: new Date().toISOString().split('T')[0],
+                            name: '',
+                            studentClass: CLASSES[0],
+                            paymentMode: 'Pending',
+                            totalAmount: '',
+                            paidAmount: '',
+                            discountPercent: '0',
+                            paymentDate: new Date().toISOString().split('T')[0],
+                            notes: '',
+                            selectedItems: [],
+                            customData: {}
+                          });
+                          setShowQuickForm(false);
+                          setMsg({ type: 'success', text: `Direct Post #${finalSrNo} Successful` });
+                        }}
+                        disabled={!fullQuickAdd.name || !fullQuickAdd.totalAmount}
+                        className="w-full py-3.5 bg-blue-600 text-white rounded-2xl text-[10px] font-black uppercase tracking-[0.2em] hover:bg-blue-700 transition-all shadow-xl shadow-blue-500/20 disabled:opacity-30 disabled:grayscale active:scale-95"
+                      >
+                        Post Record #{getNextSrNo()}
+                      </button>
                     </div>
                   </div>
                 </div>
+                )}
               </div>
             </motion.div>
           )}
         </AnimatePresence>
-
         {/* Filters Row */}
         <div className="mt-6 flex flex-col gap-4 p-4 bg-slate-50/50 rounded-2xl border border-slate-100">
           <div className="flex items-center justify-between md:hidden">
@@ -7568,6 +9237,262 @@ function LedgerSection({
       </div>
 
       <AnimatePresence>
+        {showPDFOptionModal && (
+          <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fadeIn">
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-white rounded-3xl max-w-lg w-full shadow-2xl overflow-hidden border border-slate-105 flex flex-col text-slate-800"
+            >
+              {/* Header */}
+              <div className="p-6 bg-slate-50 border-b border-slate-100 flex justify-between items-center">
+                <div>
+                  <h3 className="text-xs font-black text-slate-900 uppercase tracking-wider">PDF Export & Printer Options</h3>
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-0.5">
+                    Source: {pdfOptionSource === 'selected' ? `${pdfSelectIds?.length || 0} Selected Records` : 'Filtered Ledger Records'}
+                  </p>
+                </div>
+                <button 
+                  onClick={() => setShowPDFOptionModal(false)}
+                  className="text-slate-400 hover:text-slate-600 transition-colors bg-white p-2 rounded-xl border border-slate-200 shadow-sm"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+
+              <div className="p-6 space-y-6 flex-1 overflow-y-auto max-h-[70vh]">
+                {/* Step 1: Document View Layout */}
+                <div className="space-y-3">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block font-sans">
+                    Choose Layout Format
+                  </label>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    {/* Invoice option */}
+                    <button
+                      type="button"
+                      onClick={() => setRecordsToPrintMode('invoice')}
+                      className={`p-3.5 rounded-2xl border-2 text-left transition-all flex flex-col justify-between min-h-[140px] focus:outline-none ${
+                        recordsToPrintMode === 'invoice' 
+                          ? 'border-indigo-600 bg-indigo-50/40 text-indigo-900 shadow-lg shadow-indigo-500/10' 
+                          : 'border-slate-200 bg-white hover:border-slate-300 text-slate-700'
+                      }`}
+                    >
+                      <div className="flex items-center gap-1.5 mb-1.5">
+                        <div className={`p-1.5 rounded-lg ${recordsToPrintMode === 'invoice' ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-indigo-600'}`}>
+                          <FileText size={14} />
+                        </div>
+                        <span className="text-[11px] font-black uppercase tracking-tight">A4 Invoice</span>
+                      </div>
+                      <p className="text-[9px] text-slate-400 font-semibold leading-normal">
+                        Formal 1-per-page portrait receipt template with professional item table, cashier signatures, and store banner.
+                      </p>
+                    </button>
+
+                    {/* Cards option */}
+                    <button
+                      type="button"
+                      onClick={() => setRecordsToPrintMode('cards')}
+                      className={`p-3.5 rounded-2xl border-2 text-left transition-all flex flex-col justify-between min-h-[140px] focus:outline-none ${
+                        recordsToPrintMode === 'cards' 
+                          ? 'border-emerald-600 bg-emerald-50/40 text-emerald-900 shadow-lg shadow-emerald-500/10' 
+                          : 'border-slate-200 bg-white hover:border-slate-300 text-slate-700'
+                      }`}
+                    >
+                      <div className="flex items-center gap-1.5 mb-1.5">
+                        <div className={`p-1.5 rounded-lg ${recordsToPrintMode === 'cards' ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-emerald-600'}`}>
+                          <Printer size={14} />
+                        </div>
+                        <span className="text-[11px] font-black uppercase tracking-tight">4 Cards Grid</span>
+                      </div>
+                      <p className="text-[9px] text-slate-400 font-semibold leading-normal">
+                        Fits exactly 4 mini receipt cards in a tidy 2x2 grid. Highly efficient template for bulk thermal paper cut-outs.
+                      </p>
+                    </button>
+
+                    {/* Table option */}
+                    <button
+                      type="button"
+                      onClick={() => setRecordsToPrintMode('table')}
+                      className={`p-3.5 rounded-2xl border-2 text-left transition-all flex flex-col justify-between min-h-[140px] focus:outline-none ${
+                        recordsToPrintMode === 'table' 
+                          ? 'border-blue-600 bg-blue-50/40 text-blue-900 shadow-lg shadow-blue-500/10' 
+                          : 'border-slate-200 bg-white hover:border-slate-300 text-slate-700'
+                      }`}
+                    >
+                      <div className="flex items-center gap-1.5 mb-1.5">
+                        <div className={`p-1.5 rounded-lg ${recordsToPrintMode === 'table' ? 'bg-blue-600 text-white' : 'bg-slate-100 text-blue-600'}`}>
+                          <FileSpreadsheet size={14} />
+                        </div>
+                        <span className="text-[11px] font-black uppercase tracking-tight">Audit Table</span>
+                      </div>
+                      <p className="text-[9px] text-slate-400 font-semibold leading-normal">
+                        Tabular spreadsheet list with 15 rows per page matching simple table layout. Ideal for auditing financials.
+                      </p>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Step 2: Configure Field Visibility */}
+                <div className="space-y-3 pt-4 border-t border-slate-100">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block font-sans">
+                      Toggle Field Visibility
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const allEnabled = Object.values(printFieldVisibility).every(v => v === true);
+                        const updated: Record<string, boolean> = {};
+                        Object.keys(printFieldVisibility).forEach(k => {
+                          updated[k] = !allEnabled;
+                        });
+                        setPrintFieldVisibility(updated);
+                      }}
+                      className="text-[10px] font-black text-blue-600 uppercase tracking-wider hover:underline focus:outline-none"
+                    >
+                      {Object.values(printFieldVisibility).every(v => v === true) ? 'Hide All' : 'Show All'}
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      { key: 'storeHeader', label: 'Store Header Banner' },
+                      { key: 'paymentDetails', label: 'Payment & Date Info' },
+                      { key: 'itemsBreakdown', label: 'Items Breakdown Table' },
+                      { key: 'adminNotes', label: 'Remarks / Admin Notes' },
+                      { key: 'customFields', label: 'Database Custom Fields' },
+                      { key: 'cashierSignature', label: 'Cashier Signature Block' },
+                      { key: 'balancesOutstanding', label: 'Balances & Outstanding Alert' },
+                    ].map((field) => (
+                      <label 
+                        key={field.key}
+                        className={`flex items-center gap-2 p-2.5 rounded-xl border cursor-pointer transition-all ${
+                          printFieldVisibility[field.key] 
+                            ? 'bg-blue-50/50 border-blue-200 text-blue-900 font-bold' 
+                            : 'bg-white border-slate-200 text-slate-400 hover:border-slate-300'
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 w-3.5 h-3.5"
+                          checked={!!printFieldVisibility[field.key]}
+                          onChange={() => setPrintFieldVisibility(prev => ({ ...prev, [field.key]: !prev[field.key] }))}
+                        />
+                        <span className="text-[9px] font-bold tracking-tight uppercase leading-none select-none">{field.label}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Step 3: Layout Preset Controller */}
+                <div className="p-4 bg-indigo-50/40 rounded-2.5xl border border-indigo-100 flex flex-col sm:flex-row justify-between items-center gap-3">
+                  <div className="text-left">
+                    <span className="text-[9px] font-black text-indigo-700 uppercase tracking-widest block">Layout Preset Controller</span>
+                    <span className="text-[9px] text-indigo-900/60 font-semibold font-mono leading-tight block mt-0.5">
+                      Save current visibility & format as default
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      localStorage.setItem('uniform_pdf_layout_preset', recordsToPrintMode);
+                      localStorage.setItem('uniform_pdf_fields_preset', JSON.stringify(printFieldVisibility));
+                      setPresetSaveSuccess(true);
+                      setTimeout(() => setPresetSaveSuccess(false), 2000);
+                    }}
+                    className={`px-3.5 py-2.5 rounded-xl text-[9px] font-black uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all shadow-sm focus:outline-none w-full sm:w-auto ${
+                      presetSaveSuccess 
+                        ? 'bg-emerald-600 text-white shadow-emerald-500/20' 
+                        : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-indigo-500/20'
+                    }`}
+                  >
+                    {presetSaveSuccess ? (
+                      <>
+                        <Check size={11} /> Preset Saved!
+                      </>
+                    ) : (
+                      <>
+                        <Bookmark size={11} /> Save as Preset
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                {/* Feature Summary box */}
+                <div className="p-4 bg-slate-50 rounded-2xl border border-slate-150 space-y-2">
+                  <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest block">
+                    What's included in {recordsToPrintMode === 'invoice' ? 'Formal Portrait Invoice' : (recordsToPrintMode === 'cards' ? 'Invoice Cards' : 'Ledger Table')}
+                  </span>
+                  <div className="grid grid-cols-2 gap-2 text-[10px] font-bold text-slate-550 animate-fadeIn">
+                    {recordsToPrintMode === 'invoice' ? (
+                      <>
+                        <div className="flex items-center gap-1">&bull; Full Width Portrait Design</div>
+                        <div className="flex items-center gap-1">&bull; Academic School Wear Header</div>
+                        <div className="flex items-center gap-1">&bull; Signature / Cashier blocks</div>
+                        <div className="flex items-center gap-1">&bull; Alternating Table Rows</div>
+                        <div className="flex items-center gap-1">&bull; Balances & Disbursals</div>
+                        <div className="flex items-center gap-1">&bull; Store Remarks & Details</div>
+                      </>
+                    ) : recordsToPrintMode === 'cards' ? (
+                      <>
+                        <div className="flex items-center gap-1">&bull; Full Items Breakdown</div>
+                        <div className="flex items-center gap-1">&bull; Computed Discount %</div>
+                        <div className="flex items-center gap-1">&bull; Grand Total Payable</div>
+                        <div className="flex items-center gap-1">&bull; Net Paid & Method</div>
+                        <div className="flex items-center gap-1">&bull; Student Class & Grade</div>
+                        <div className="flex items-center gap-1">&bull; Custom Fields & Notes</div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="flex items-center gap-1">&bull; Transaction Sequences</div>
+                        <div className="flex items-center gap-1">&bull; Standard Pagination</div>
+                        <div className="flex items-center gap-1">&bull; Sequential Record List</div>
+                        <div className="flex items-center gap-1">&bull; Total Amount Column</div>
+                        <div className="flex items-center gap-1">&bull; Compact Font Scale</div>
+                        <div className="flex items-center gap-1">&bull; A4 Width Fitting</div>
+                      </>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Actions Footer */}
+              <div className="p-6 bg-slate-50 border-t border-slate-100 flex flex-col sm:flex-row gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowPDFOptionModal(false);
+                    setShowPrintPreviewModal(true);
+                  }}
+                  className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white py-3 px-4 rounded-xl text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 shadow-lg shadow-indigo-500/20 active:scale-[0.98] transition-all font-mono"
+                >
+                  <Eye size={14} /> LIVE PREVIEW
+                </button>
+                <button
+                  onClick={() => {
+                    setShowPDFOptionModal(false);
+                    triggerDownloadPDF(pdfSelectIds);
+                  }}
+                  className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-3 px-4 rounded-xl text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 shadow-lg shadow-blue-500/20 active:scale-[0.98] transition-all font-mono"
+                >
+                  <FileDown size={14} /> DOWNLOAD PDF
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowPDFOptionModal(false);
+                    triggerPrint(pdfSelectIds);
+                  }}
+                  className="flex-1 bg-slate-800 hover:bg-slate-700 text-white py-3 px-4 rounded-xl text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 active:scale-[0.98] transition-all font-mono"
+                >
+                  <Printer size={14} /> DIRECT PRINT
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
         {showExportModal && (
           <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
             <motion.div 
@@ -7926,10 +9851,10 @@ function LedgerSection({
                       </div>
                     <div>
                       <div className="flex items-center gap-1.5">
-                        <h4 className="text-sm font-black text-slate-900 line-clamp-1">{record.name}</h4>
+                        <h4 className="text-sm font-black text-slate-900 line-clamp-1">{highlightText(record.name, searchQuery)}</h4>
                         {isDuplicate && <span className="text-[7px] font-black bg-red-100 text-red-600 px-1.5 py-0.5 rounded border border-red-200 uppercase tracking-widest">DUPLICATE</span>}
                       </div>
-                      <p className="text-[9px] font-bold text-slate-400 uppercase">{record.studentClass} • {record.date}</p>
+                      <p className="text-[9px] font-bold text-slate-400 uppercase">{highlightText(record.studentClass, searchQuery)} • {record.date}</p>
                     </div>
                   </div>
                   <div className={`px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest ${
@@ -7943,7 +9868,7 @@ function LedgerSection({
                 <div className="space-y-3 pt-2 mb-4 border-t border-slate-50">
                   {Object.entries(record.items || {}).map(([item, sizes]: [string, any]) => (
                     <div key={item} className="flex flex-col gap-1.5">
-                      <div className="text-[9px] font-black text-blue-600 uppercase tracking-tighter">{item}</div>
+                      <div className="text-[9px] font-black text-blue-600 uppercase tracking-tighter">{highlightText(item, searchQuery)}</div>
                       <div className="flex flex-wrap gap-2">
                         {Object.entries(sizes).map(([size, info]: [string, any]) => (
                           <div key={size} className="flex items-center gap-1.5 bg-slate-50 px-2 py-1 rounded-lg border border-slate-100 group">
@@ -7963,15 +9888,13 @@ function LedgerSection({
                     <p className="text-sm font-black text-slate-900 font-mono">₹ {record.totalAmount}</p>
                   </div>
                   <div className="flex gap-2 shrink-0">
-                    {can('edit') && (
-                      <button 
-                        onClick={(e) => { e.stopPropagation(); bulkArchiveRecords([record.id], !record.isArchived); }}
-                        className={`p-3 rounded-xl transition-all shadow-sm ${record.isArchived ? 'bg-indigo-600 text-white' : 'bg-indigo-50 text-indigo-600 hover:bg-indigo-600 hover:text-white'}`}
-                        title={record.isArchived ? "Restore record" : "Archive record"}
-                      >
-                        {record.isArchived ? <ArchiveRestore size={16} /> : <Archive size={16} />}
-                      </button>
-                    )}
+                    <button 
+                      onClick={(e) => { e.stopPropagation(); handlePrint([record.id]); }}
+                      className="p-3 bg-teal-50 text-teal-700 rounded-xl hover:bg-teal-600 hover:text-white transition-all shadow-sm"
+                      title="Print Invoice"
+                    >
+                      <Printer size={16} />
+                    </button>
                     {can('edit') && (
                       <button 
                         onClick={(e) => { e.stopPropagation(); setEditingRecord(record); }}
@@ -8261,7 +10184,43 @@ function LedgerSection({
                     />
                   )}
                 </td>
-                <td className="bg-inherit px-4 py-4 text-slate-400 font-mono border-r border-slate-50 print:text-black transition-colors">{rec.date}</td>
+                <td className="bg-inherit px-4 py-4 border-r border-slate-50 print:text-black transition-colors">
+                  {can('edit') && editingCell?.id === rec.id && editingCell?.field === 'date' ? (
+                    <input 
+                      autoFocus
+                      type="date"
+                      className="w-full px-2 py-1 text-[10px] border border-blue-500 rounded outline-none bg-white font-mono"
+                      defaultValue={(() => {
+                        const parts = (rec.date || '').split('/');
+                        if (parts.length === 3) {
+                          return `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
+                        }
+                        return new Date().toISOString().split('T')[0];
+                      })()}
+                      onBlur={(e) => {
+                        if (e.target.value) {
+                          const displayDate = new Date(e.target.value).toLocaleDateString('en-IN');
+                          updateRecord(rec.id, { date: displayDate });
+                        }
+                        setEditingCell(null);
+                      }}
+                      onChange={(e) => {
+                        if (e.target.value) {
+                          const displayDate = new Date(e.target.value).toLocaleDateString('en-IN');
+                          updateRecord(rec.id, { date: displayDate });
+                        }
+                        setEditingCell(null);
+                      }}
+                    />
+                  ) : (
+                    <div 
+                      className={`font-mono text-slate-400 leading-none rounded px-1 transition-colors ${can('edit') ? 'cursor-pointer hover:bg-blue-50/50 hover:text-blue-600' : ''}`}
+                      onClick={() => can('edit') && setEditingCell({ id: rec.id, field: 'date' })}
+                    >
+                      {rec.date}
+                    </div>
+                  )}
+                </td>
                 <td className="bg-inherit px-6 py-4 border-r-[2px] border-slate-100 transition-colors">
                   {can('edit') && editingCell?.id === rec.id && editingCell?.field === 'name' ? (
                     <input 
@@ -8283,7 +10242,7 @@ function LedgerSection({
                       className={`font-bold text-slate-700 uppercase leading-none rounded px-1 transition-colors ${can('edit') ? 'cursor-pointer hover:bg-blue-50/50' : ''}`}
                       onClick={() => can('edit') && setEditingCell({ id: rec.id, field: 'name' })}
                     >
-                      {rec.name}
+                      {highlightText(rec.name, searchQuery)}
                     </div>
                   )}
                   
@@ -8309,7 +10268,7 @@ function LedgerSection({
                         className={`text-[9px] text-slate-400 font-black uppercase tracking-tighter shadow-sm inline-block px-1.5 py-0.5 bg-slate-100 rounded border border-slate-200 print:border-slate-300 print:bg-transparent transition-all ${can('edit') ? 'cursor-pointer hover:border-blue-300 hover:text-blue-600' : ''}`}
                         onClick={() => can('edit') && setEditingCell({ id: rec.id, field: 'studentClass' })}
                       >
-                        {rec.studentClass}
+                        {highlightText(rec.studentClass, searchQuery)}
                       </div>
                     )}
 
@@ -8335,7 +10294,7 @@ function LedgerSection({
                         title={rec.notes || 'Notes'}
                         onClick={() => can('edit') && setEditingCell({ id: rec.id, field: 'notes' })}
                       >
-                        &ldquo;{rec.notes || '...'}&rdquo;
+                        &ldquo;{rec.notes ? highlightText(rec.notes, searchQuery) : '...'}&rdquo;
                       </div>
                     )}
                   </div>
@@ -8369,50 +10328,77 @@ function LedgerSection({
                   {rec.discountPercent || 0}%
                 </td>
                 <td className="px-6 py-4 text-right border-r border-slate-50 font-mono text-[10px] min-w-[100px]">
-                  {can('edit') && rec.paymentMode !== 'Pending' && editingCell?.id === rec.id && editingCell?.field === 'paidAmount' ? (
+                  {can('edit') && editingCell?.id === rec.id && editingCell?.field === 'paidAmount' ? (
                     <input 
                       autoFocus
                       type="number"
                       className="w-full px-2 py-1 text-xs border border-blue-500 rounded outline-none text-right"
-                      defaultValue={rec.paidAmount || 0}
+                      defaultValue={rec.paidAmount !== undefined && rec.paidAmount !== null ? rec.paidAmount : (rec.paymentMode === 'Pending' ? rec.totalAmount : 0)}
                       onBlur={(e) => {
-                        updateRecord(rec.id, { paidAmount: Number(e.target.value) });
+                        const val = Number(e.target.value);
+                        const updates: any = { paidAmount: val };
+                        if (val > 0 && rec.paymentMode === 'Pending') {
+                          updates.paymentMode = 'Cash';
+                          updates.paymentDate = rec.paymentDate || new Date().toISOString().split('T')[0];
+                        }
+                        updateRecord(rec.id, updates);
                         setEditingCell(null);
                       }}
                       onKeyDown={(e) => {
-                        if (e.key === 'Enter') e.currentTarget.blur();
+                        if (e.key === 'Enter') {
+                          const val = Number((e.target as HTMLInputElement).value);
+                          const updates: any = { paidAmount: val };
+                          if (val > 0 && rec.paymentMode === 'Pending') {
+                            updates.paymentMode = 'Cash';
+                            updates.paymentDate = rec.paymentDate || new Date().toISOString().split('T')[0];
+                          }
+                          updateRecord(rec.id, updates);
+                          setEditingCell(null);
+                        }
                         if (e.key === 'Escape') setEditingCell(null);
                       }}
                     />
                   ) : (
                     <div 
-                      className={`font-bold transition-colors ${can('edit') && rec.paymentMode !== 'Pending' ? 'cursor-pointer hover:text-blue-600' : 'text-slate-400'}`}
-                      onClick={() => can('edit') && rec.paymentMode !== 'Pending' && setEditingCell({ id: rec.id, field: 'paidAmount' })}
+                      className={`font-bold transition-colors ${can('edit') ? 'cursor-pointer hover:text-blue-600 hover:bg-blue-50/50 px-1 rounded' : 'text-slate-400'}`}
+                      onClick={() => can('edit') && setEditingCell({ id: rec.id, field: 'paidAmount' })}
                     >
                       ₹ {rec.paidAmount || 0}
                     </div>
                   )}
                 </td>
                 <td className="px-6 py-4 text-center border-r border-slate-50 font-mono text-[10px] min-w-[100px]">
-                  {can('edit') && rec.paymentMode !== 'Pending' && editingCell?.id === rec.id && editingCell?.field === 'paymentDate' ? (
+                  {can('edit') && editingCell?.id === rec.id && editingCell?.field === 'paymentDate' ? (
                     <input 
                       autoFocus
                       type="date"
                       className="w-full px-2 py-1 text-[9px] border border-blue-500 rounded outline-none"
                       defaultValue={rec.paymentDate || ''}
                       onBlur={(e) => {
-                        updateRecord(rec.id, { paymentDate: e.target.value });
+                        const val = e.target.value;
+                        const updates: any = { paymentDate: val };
+                        if (val && rec.paymentMode === 'Pending') {
+                          updates.paymentMode = 'Cash';
+                          updates.paidAmount = rec.paidAmount || rec.totalAmount;
+                        }
+                        updateRecord(rec.id, updates);
                         setEditingCell(null);
                       }}
                       onChange={(e) => {
-                        updateRecord(rec.id, { paymentDate: e.target.value });
+                        const val = e.target.value;
+                        const updates: any = { paymentDate: val };
+                        if (val && rec.paymentMode === 'Pending') {
+                          updates.paymentMode = 'Cash';
+                          updates.paidAmount = rec.paidAmount || rec.totalAmount;
+                        }
+                        updateRecord(rec.id, updates);
                         setEditingCell(null);
                       }}
                     />
                   ) : (
                     <div 
-                      className={`font-bold transition-colors ${can('edit') && rec.paymentMode !== 'Pending' ? 'cursor-pointer hover:text-blue-600' : 'text-slate-400'}`}
-                      onClick={() => can('edit') && rec.paymentMode !== 'Pending' && setEditingCell({ id: rec.id, field: 'paymentDate' })}
+                      className={`font-bold transition-colors ${can('edit') ? 'cursor-pointer hover:text-blue-600 hover:bg-blue-50/50 px-1 rounded' : 'text-slate-400'}`}
+                      onClick={() => can('edit') && setEditingCell({ id: rec.id, field: 'paymentDate' })}
                     >
                       {rec.paymentDate ? new Date(rec.paymentDate).toLocaleDateString('en-GB') : '-'}
                     </div>
@@ -8491,15 +10477,13 @@ function LedgerSection({
                 </td>
                 <td className="px-4 py-4 text-center print:hidden border-l border-slate-50">
                   <div className="flex items-center justify-center gap-1">
-                    {can('edit') && (
-                      <button 
-                        onClick={() => bulkArchiveRecords([rec.id], !rec.isArchived)} 
-                        title={rec.isArchived ? "Restore record" : "Archive record"}
-                        className={`p-2 rounded-xl transition-all opacity-0 group-hover/row:opacity-100 focus:opacity-100 ${rec.isArchived ? 'text-indigo-600 bg-indigo-50 opacity-100' : 'text-slate-300 hover:text-indigo-600 hover:bg-indigo-50'}`}
-                      >
-                        {rec.isArchived ? <ArchiveRestore size={16} /> : <Archive size={16} />}
-                      </button>
-                    )}
+                    <button 
+                      onClick={() => handlePrint([rec.id])} 
+                      title="Print Invoice"
+                      className="text-slate-300 hover:text-teal-600 p-2 rounded-xl hover:bg-teal-50 transition-all opacity-0 group-hover/row:opacity-100 focus:opacity-100"
+                    >
+                      <Printer size={16} />
+                    </button>
                     {can('edit') && (
                       <button 
                         onClick={() => setEditingRecord(rec)} 
@@ -8997,6 +10981,730 @@ function ImportResultModal({ result, onClose }: { result: any; onClose: () => vo
               Download Error Log
            </button>
            <button onClick={onClose} className="px-8 py-3 bg-white text-slate-900 border border-slate-200 rounded-2xl font-black text-xs uppercase tracking-widest hover:border-slate-300 transition-all shadow-sm">Close</button>
+        </div>
+      </motion.div>
+    </div>
+  );
+}
+
+function PrintPreviewModal({
+  isOpen,
+  onClose,
+  allRecords,
+  filteredRecords,
+  recordsToPrintMode,
+  setRecordsToPrintMode,
+  printFieldVisibility,
+  setPrintFieldVisibility,
+  triggerPrint,
+  triggerDownloadPDF,
+  pdfSelectIds,
+  customFields
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  allRecords: SaleRecord[];
+  filteredRecords: SaleRecord[];
+  recordsToPrintMode: 'invoice' | 'cards' | 'table';
+  setRecordsToPrintMode: (mode: 'invoice' | 'cards' | 'table') => void;
+  printFieldVisibility: Record<string, boolean>;
+  setPrintFieldVisibility: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
+  triggerPrint: (ids?: string[]) => void;
+  triggerDownloadPDF: (ids?: string[]) => void;
+  pdfSelectIds?: string[];
+  customFields: any[];
+}) {
+  const [currentPageIndex, setCurrentPageIndex] = useState(0);
+  const [zoomScale, setZoomScale] = useState(0.85);
+  const [presetSaveSuccess, setPresetSaveSuccess] = useState(false);
+
+  // Reset to page 0 when layout mode or record list changes
+  useEffect(() => {
+    setCurrentPageIndex(0);
+  }, [recordsToPrintMode, pdfSelectIds]);
+
+  if (!isOpen) return null;
+
+  // Compute records to preview
+  const recordsToUse = pdfSelectIds && pdfSelectIds.length > 0
+    ? allRecords.filter(r => pdfSelectIds.includes(r.id))
+    : filteredRecords;
+
+  const isInvoice = recordsToPrintMode === 'invoice';
+  const isCards = recordsToPrintMode === 'cards';
+  const chunkSize = isInvoice ? 1 : (isCards ? 4 : 15);
+
+  const chunks: SaleRecord[][] = [];
+  for (let i = 0; i < recordsToUse.length; i += chunkSize) {
+    chunks.push(recordsToUse.slice(i, i + chunkSize));
+  }
+
+  // Safe page index check
+  const totalPages = Math.max(1, chunks.length);
+  const activePageIndex = Math.min(currentPageIndex, totalPages - 1);
+  const chunkRecords = chunks[activePageIndex] || [];
+
+  return (
+    <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-slate-900/75 backdrop-blur-md font-sans">
+      <motion.div 
+        initial={{ scale: 0.98, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        exit={{ scale: 0.98, opacity: 0 }}
+        className="bg-slate-900 text-white rounded-[2rem] w-full max-w-7xl h-[92vh] flex flex-col overflow-hidden shadow-2xl border border-slate-700/50"
+      >
+        {/* Header */}
+        <div className="p-6 bg-slate-950 border-b border-slate-800 flex justify-between items-center flex-shrink-0">
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 bg-blue-500/10 text-blue-400 rounded-xl border border-blue-500/20">
+              <Eye size={20} />
+            </div>
+            <div>
+              <h3 className="text-sm font-black uppercase tracking-wider text-white font-sans">Live Document Print Preview</h3>
+              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-0.5">
+                Previewing: {pdfSelectIds && pdfSelectIds.length > 0 ? `${pdfSelectIds.length} Selected` : 'Filtered'} Ledger Records &bull; {recordsToUse.length} Total
+              </p>
+            </div>
+          </div>
+          <button 
+            onClick={onClose}
+            className="text-slate-400 hover:text-white transition-colors bg-slate-800 hover:bg-slate-700 p-2 rounded-xl border border-slate-700/50 shadow-sm"
+          >
+            <X size={18} />
+          </button>
+        </div>
+
+        {/* Content Space (Split Layout) */}
+        <div className="flex-1 flex flex-col lg:flex-row overflow-hidden min-h-0">
+          
+          {/* Left panel: Controls */}
+          <div className="w-full lg:w-96 bg-slate-950 border-r border-slate-800 p-6 overflow-y-auto space-y-6 flex-shrink-0 custom-scroll">
+            {/* Step 1: Layout Mode */}
+            <div className="space-y-3">
+              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">
+                1. Choose Layout Format
+              </label>
+              <div className="space-y-2">
+                {[
+                  { id: 'invoice', label: 'A4 Single Invoice', desc: 'Formal portrait receipt template with professional item table, cashier signatures.' },
+                  { id: 'cards', label: '4 Cards Grid', desc: 'Fits exactly 4 mini receipt cards in a tidy 2x2 grid. Highly efficient.' },
+                  { id: 'table', label: 'Tabular Ledger Sheet', desc: 'Standard ledger table report format. Lists 15 records per page list.' }
+                ].map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => {
+                      setRecordsToPrintMode(opt.id as any);
+                    }}
+                    className={`w-full p-3.5 rounded-2xl border-2 text-left transition-all flex flex-col gap-1 focus:outline-none ${
+                      recordsToPrintMode === opt.id 
+                        ? 'border-blue-500 bg-blue-500/10 text-white shadow-lg' 
+                        : 'border-slate-800 bg-slate-900/50 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <span className="text-[11px] font-black uppercase tracking-wider">{opt.label}</span>
+                    <span className="text-[9px] text-slate-400 leading-normal">{opt.desc}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Step 2: Custom Toggles */}
+            <div className="space-y-3 pt-5 border-t border-slate-800">
+              <div className="flex items-center justify-between">
+                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block">
+                  2. Toggle Field Visibility
+                </label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const allEnabled = Object.values(printFieldVisibility).every(v => v === true);
+                    const updated: Record<string, boolean> = {};
+                    Object.keys(printFieldVisibility).forEach(k => {
+                      updated[k] = !allEnabled;
+                    });
+                    setPrintFieldVisibility(updated);
+                  }}
+                  className="text-[9px] font-black text-blue-400 uppercase tracking-wider hover:underline"
+                >
+                  {Object.values(printFieldVisibility).every(v => v === true) ? 'Hide All' : 'Show All'}
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 gap-2">
+                {[
+                  { key: 'storeHeader', label: 'Store Header Banner' },
+                  { key: 'paymentDetails', label: 'Payment & Date Info' },
+                  { key: 'itemsBreakdown', label: 'Items Breakdown Table' },
+                  { key: 'adminNotes', label: 'Remarks / Admin Notes' },
+                  { key: 'customFields', label: 'Database Custom Fields' },
+                  { key: 'cashierSignature', label: 'Cashier Signature Block' },
+                  { key: 'balancesOutstanding', label: 'Balances & Outstanding Alert' },
+                ].map((field) => (
+                  <label 
+                    key={field.key}
+                    className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition-all ${
+                      printFieldVisibility[field.key] 
+                        ? 'bg-blue-600/10 border-blue-500/50 text-white font-bold' 
+                        : 'bg-slate-900/30 border-slate-800 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      className="rounded border-slate-700 text-blue-500 focus:ring-blue-500 bg-slate-950 w-4 h-4"
+                      checked={!!printFieldVisibility[field.key]}
+                      onChange={() => setPrintFieldVisibility(prev => ({ ...prev, [field.key]: !prev[field.key] }))}
+                    />
+                    <span className="text-[10px] font-extrabold tracking-tight uppercase leading-none select-none">{field.label}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            {/* Save preset panel */}
+            <div className="p-4 bg-slate-950 border border-slate-800 rounded-2xl space-y-2">
+              <span className="text-[9px] font-black text-indigo-400 uppercase tracking-widest block">Layout Preset Controller</span>
+              <p className="text-[9px] text-slate-400 font-semibold leading-tight">
+                Save current custom format &amp; field rules as your permanent hardware printing defaults.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  localStorage.setItem('uniform_pdf_layout_preset', recordsToPrintMode);
+                  localStorage.setItem('uniform_pdf_fields_preset', JSON.stringify(printFieldVisibility));
+                  setPresetSaveSuccess(true);
+                  setTimeout(() => setPresetSaveSuccess(false), 2000);
+                }}
+                className={`w-full py-2 px-3 rounded-xl text-[9px] font-black uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all shadow-sm ${
+                  presetSaveSuccess 
+                    ? 'bg-emerald-600 text-white' 
+                    : 'bg-indigo-600 hover:bg-indigo-700 text-white'
+                }`}
+              >
+                {presetSaveSuccess ? (
+                  <>
+                    <Check size={12} /> Default Preset Saved!
+                  </>
+                ) : (
+                  <>
+                    <Bookmark size={12} /> Save default Print settings
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+
+          {/* Right panel: Live interactive paper stage */}
+          <div className="flex-1 bg-slate-955 flex flex-col overflow-hidden relative">
+            {/* Viewport Top toolbar */}
+            <div className="p-4 bg-slate-900/50 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 text-white flex-shrink-0">
+              {/* Pagination control */}
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={currentPageIndex <= 0}
+                  onClick={() => setCurrentPageIndex(prev => Math.max(0, prev - 1))}
+                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-30 rounded-lg text-[10px] font-black uppercase tracking-wide border border-slate-700 transition"
+                >
+                  &larr; Prev Page
+                </button>
+                <span className="text-[10px] font-mono font-black text-slate-300">
+                  Page {currentPageIndex + 1} of {totalPages}
+                </span>
+                <button
+                  type="button"
+                  disabled={currentPageIndex >= totalPages - 1}
+                  onClick={() => setCurrentPageIndex(prev => Math.min(totalPages - 1, prev + 1))}
+                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-30 rounded-lg text-[10px] font-black uppercase tracking-wide border border-slate-700 transition"
+                >
+                  Next Page &rarr;
+                </button>
+              </div>
+
+              {/* Zoom controls */}
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setZoomScale(prev => Math.max(0.4, prev - 0.1))}
+                  className="p-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-300 hover:text-white"
+                  title="Zoom Out"
+                >
+                  <ZoomOut size={14} />
+                </button>
+                <span className="text-[10px] font-mono font-bold text-slate-400 bg-slate-950 px-2.5 py-1 rounded-md border border-slate-800">
+                  {Math.round(zoomScale * 100)}%
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setZoomScale(prev => Math.min(1.5, prev + 0.1))}
+                  className="p-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-300 hover:text-white"
+                  title="Zoom In"
+                >
+                  <ZoomIn size={14} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setZoomScale(0.85)}
+                  className="text-[9px] uppercase font-black bg-slate-800 hover:bg-slate-700 px-2 py-1 rounded-md"
+                >
+                  Reset
+                </button>
+              </div>
+            </div>
+
+            {/* Virtual A4 Canvas */}
+            <div className="flex-1 overflow-auto p-8 flex items-start justify-center custom-scroll bg-slate-900">
+              <div 
+                className="transition-transform duration-200 shadow-2xl rounded-sm overflow-hidden"
+                style={{
+                  transform: `scale(${zoomScale})`,
+                  transformOrigin: 'top center',
+                  width: '202mm',
+                  height: '287mm',
+                  minWidth: '202mm',
+                  minHeight: '287mm',
+                }}
+              >
+                {/* Embedded paper-preview render */}
+                <div 
+                  className="h-full w-full bg-white text-slate-900 overflow-hidden box-border relative flex flex-col justify-between"
+                  style={{
+                    padding: isInvoice ? '8mm' : (isCards ? '6mm' : '8mm'),
+                  }}
+                >
+                  {isInvoice ? (
+                    /* Invoice rendering */
+                    <div className="flex flex-col justify-between h-full bg-white text-slate-850 p-3 flex-grow" style={{ height: '271mm' }}>
+                      <div className="text-slate-900">
+                        {printFieldVisibility.storeHeader && (
+                          <div className="flex justify-between items-start border-b-2 border-slate-900 pb-5 mb-5 text-slate-900">
+                            <div className="flex gap-4 items-center">
+                              <div className="w-12 h-12 bg-indigo-950 rounded-2xl flex items-center justify-center text-white font-black font-mono text-lg tracking-widest shadow-md">
+                                U
+                              </div>
+                              <div className="text-left">
+                                <h2 className="text-base font-black uppercase text-indigo-950 tracking-wider">SCHOOL WEAR STATIONERY</h2>
+                                <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mt-0.5">Authorized Uniform &amp; Materials Distributor</p>
+                                <p className="text-[8px] text-slate-400 font-mono mt-1">Delhi NCR &bull; support@uniformstore.example.com &bull; Tel: +91 11 2345 6789</p>
+                              </div>
+                            </div>
+                            <div className="text-right flex flex-col items-end">
+                              <span className="text-[8px] font-extrabold uppercase tracking-widest text-slate-400 mb-1">Receipt Serial No.</span>
+                              <span className="text-sm font-black font-mono text-indigo-950 bg-indigo-50/50 border-2 border-indigo-900/10 px-3.5 py-1 rounded-xl shadow-xs inline-block">
+                                #{chunkRecords[0]?.srNo}
+                              </span>
+                            </div>
+                          </div>
+                        )}
+
+                        {chunkRecords[0] ? (
+                          <>
+                            <div className="grid grid-cols-2 gap-6 bg-slate-50/80 border border-slate-200 rounded-2xl p-4 mb-5 text-slate-900">
+                              <div className="space-y-1.5 text-left">
+                                <span className="text-[8px] font-black uppercase tracking-widest text-slate-400 block border-b border-slate-100 pb-1">Invoice Issued To:</span>
+                                <div className="pt-0.5">
+                                  <span className="text-[8px] font-extrabold text-slate-400 uppercase tracking-widest block">Student Customer</span>
+                                  <h3 className="text-sm font-black text-slate-900 uppercase tracking-wide mt-0.5">{chunkRecords[0].name}</h3>
+                                </div>
+                                <div className="flex items-center gap-2 pt-1">
+                                  <span className="text-[8px] font-extrabold text-slate-400 uppercase tracking-widest">Aca. Class:</span>
+                                  <span className="text-[10px] font-black bg-indigo-100 text-indigo-900 px-2 py-0.5 rounded-lg border border-indigo-200/50 inline-block font-mono">
+                                    {chunkRecords[0].studentClass}
+                                  </span>
+                                </div>
+                              </div>
+
+                              {printFieldVisibility.paymentDetails && (
+                                <div className="text-right border-l border-slate-200 pl-6 font-mono space-y-1.5">
+                                  <span className="text-[8px] font-black uppercase tracking-widest text-slate-400 block border-b border-slate-100 pb-1 text-right">Receipt Details:</span>
+                                  <div className="space-y-1 text-[9px] text-slate-600 pt-0.5">
+                                    <div className="flex justify-between">
+                                      <span className="text-slate-400 uppercase text-[8px] font-black tracking-wider text-left">Date of Sale:</span>
+                                      <span className="font-extrabold text-slate-800 text-right">{chunkRecords[0].date}</span>
+                                    </div>
+                                    <div className="flex justify-between items-center gap-2">
+                                      <span className="text-slate-400 uppercase text-[8px] font-black tracking-wider text-left">Payment Status:</span>
+                                      <span className={`px-2 py-0.5 rounded-lg text-[8px] font-black uppercase tracking-wider text-right ${
+                                        chunkRecords[0].paymentMode === 'Pending' 
+                                          ? 'bg-amber-100 text-amber-900 border border-amber-300/60' 
+                                          : 'bg-emerald-100 text-emerald-950 border border-emerald-300/60'
+                                      }`}>
+                                        {chunkRecords[0].paymentMode === 'Pending' ? 'Pending' : 'Settled'}
+                                      </span>
+                                    </div>
+                                    <div className="flex justify-between">
+                                      <span className="text-slate-400 uppercase text-[8px] font-black tracking-wider text-left">Payment Mode:</span>
+                                      <span className="font-extrabold text-slate-800 uppercase text-right">{chunkRecords[0].paymentMode}</span>
+                                    </div>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+
+                            {printFieldVisibility.itemsBreakdown && (
+                              <div className="mt-5 text-slate-900">
+                                <div className="flex items-center gap-2 mb-2">
+                                  <span className="text-[8px] font-black uppercase tracking-widest text-slate-400">Itemized Purchase Breakdown</span>
+                                  <div className="flex-1 h-[1px] bg-slate-100"></div>
+                                </div>
+                                <table className="w-full text-left border border-slate-200 rounded-xl overflow-hidden shadow-xs" style={{ borderCollapse: 'separate', borderSpacing: 0, fontSize: '9px' }}>
+                                  <thead>
+                                    <tr className="border-b border-slate-350 bg-slate-900 text-white uppercase text-[8px] font-black tracking-widest">
+                                      <th className="py-2.5 px-3 text-center w-10 font-sans">#</th>
+                                      <th className="py-2.5 px-3 font-sans">Uniform Particular / Item Name</th>
+                                      <th className="py-2.5 px-3 text-center w-20 font-sans">Size</th>
+                                      <th className="py-2.5 px-3 text-center w-16 font-sans">Qty</th>
+                                      <th className="py-2.5 px-3 text-right w-24 font-sans">Unit Price (₹)</th>
+                                      <th className="py-2.5 px-3 text-right w-28 font-sans rounded-tr-xl">Line Total (₹)</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-slate-100 bg-white">
+                                    {chunkRecords[0].items.map((item, idx) => (
+                                      <tr key={item.id || idx} className={`text-slate-800 font-medium ${idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/40'}`}>
+                                        <td className="py-2.5 px-3 text-center font-mono text-slate-400 font-bold border-r border-slate-100">{idx + 1}</td>
+                                        <td className="py-2.5 px-3 font-black text-indigo-955 uppercase">{item.item}</td>
+                                        <td className="py-2.5 px-3 text-center font-mono font-bold text-slate-600 border-x border-slate-100">{item.size}</td>
+                                        <td className="py-2.5 px-3 text-center font-mono font-bold text-slate-700 border-r border-slate-100">{item.qty}</td>
+                                        <td className="py-2.5 px-3 text-right font-mono text-slate-600">₹{item.rate}</td>
+                                        <td className="py-2.5 px-3 text-right font-mono font-black text-slate-900 bg-slate-50/50">₹{item.qty * item.rate}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            )}
+
+                            {((printFieldVisibility.adminNotes && chunkRecords[0].notes) || (printFieldVisibility.customFields && chunkRecords[0].customData && Object.keys(chunkRecords[0].customData).length > 0)) && (
+                              <div className="mt-5 p-4 bg-slate-50 border border-slate-150 rounded-2xl space-y-3 text-slate-900 text-left">
+                                {printFieldVisibility.adminNotes && chunkRecords[0].notes && (
+                                  <div>
+                                    <span className="text-[8px] font-black uppercase tracking-widest text-slate-400 block mb-1">Administrative Cashier Remarks</span>
+                                    <p className="text-[9px] text-slate-600 font-medium leading-relaxed font-mono italic">
+                                      &ldquo;{chunkRecords[0].notes}&rdquo;
+                                    </p>
+                                  </div>
+                                )}
+                                {printFieldVisibility.customFields && chunkRecords[0].customData && Object.keys(chunkRecords[0].customData).filter(k => chunkRecords[0].customData[k] !== undefined && chunkRecords[0].customData[k] !== '').map((key) => {
+                                  const field = customFields?.find((f: any) => f.id === key);
+                                  const label = field ? field.label : key;
+                                  return (
+                                    <div key={key} className="flex justify-between font-mono text-[9px] text-slate-600 py-0.5 border-b border-slate-100/40 last:border-0">
+                                      <span className="font-extrabold uppercase text-[8px] text-slate-400 tracking-wider text-left">{label}:</span>
+                                      <span className="font-bold text-slate-950 text-right">{String(chunkRecords[0].customData[key])}</span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </>
+                        ) : (
+                          <div className="py-20 text-center text-slate-400 text-xs font-bold uppercase tracking-widest">No Record Selected</div>
+                        )}
+                      </div>
+
+                      <div className="border-t-2 border-slate-900 pt-4 space-y-4 text-slate-900">
+                        <div className="flex justify-between items-start">
+                          <div className="text-left font-sans space-y-3.5 flex-1 max-w-sm">
+                            {printFieldVisibility.cashierSignature && (
+                              <div className="pt-2 text-left">
+                                <div className="border-b border-slate-300 w-44 pb-1 mb-1.5 h-10"></div>
+                                <span className="text-[8px] font-black text-slate-400 uppercase tracking-widest block font-sans">Authorized Signatory Stamp</span>
+                                <span className="text-[7.5px] text-slate-400 font-medium block mt-0.5">Uniform Counter Manager Office</span>
+                              </div>
+                            )}
+                            <div className="p-3 bg-slate-50 border border-slate-200/65 rounded-xl text-left">
+                              <span className="text-[8px] font-black uppercase tracking-widest text-slate-400 block mb-1">Exchange Policy</span>
+                              <p className="text-[8px] text-slate-500 font-medium leading-normal">
+                                Goods once sold can be exchanged within 7 days ONLY if presented with the original label, tags intact, and this transaction printed invoice copy. Fits must be unused and clean.
+                              </p>
+                            </div>
+                          </div>
+
+                          {chunkRecords[0] && (
+                            <div className="w-64 space-y-1.5 bg-slate-50 border border-slate-200 rounded-2xl p-3.5 shadow-xs font-mono text-left">
+                              <div className="flex justify-between text-[9px] text-slate-500 pb-1 border-b border-slate-100">
+                                <span className="text-left">Gross Subtotal:</span>
+                                <span className="font-bold text-right">₹{chunkRecords[0].totalAmount + (chunkRecords[0].discount || 0)}</span>
+                              </div>
+                              {chunkRecords[0].discount > 0 && (
+                                <div className="flex justify-between text-[9px] text-red-650 font-bold pb-1 border-b border-slate-100">
+                                  <span className="text-left">Discount Applied:</span>
+                                  <span className="text-right">-₹{chunkRecords[0].discount}</span>
+                                </div>
+                              )}
+                              <div className="flex justify-between text-[9px] text-emerald-600 font-bold pb-1 border-b border-slate-100">
+                                <span className="text-left">Amount Received:</span>
+                                <span className="text-right">₹{chunkRecords[0].paidAmount || 0}</span>
+                              </div>
+                              <div className="flex justify-between items-center pt-1.5 pb-1 text-[9px]">
+                                <span className="font-black uppercase text-indigo-950 tracking-wider text-left">Net Payable:</span>
+                                <span className="text-base font-black text-indigo-950 font-mono text-right">₹{chunkRecords[0].totalAmount}</span>
+                              </div>
+                              {printFieldVisibility.balancesOutstanding && chunkRecords[0].totalAmount - (chunkRecords[0].paidAmount || 0) > 0 && (
+                                <div className="bg-rose-50 text-rose-900 p-2 rounded-xl text-[8.5px] font-black uppercase tracking-tight font-sans text-center mt-2 border border-rose-200/60 shadow-xs">
+                                  Outstanding Balance: ₹{chunkRecords[0].totalAmount - (chunkRecords[0].paidAmount || 0)}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                        
+                        <div className="text-center font-mono text-[8px] text-slate-400 uppercase tracking-widest pt-2 border-t border-slate-100">
+                          === Thank you for your custom &amp; business! ===
+                        </div>
+                      </div>
+                    </div>
+                  ) : isCards ? (
+                    /* 4 mini receipt cards format */
+                    <div className="grid grid-cols-2 grid-rows-2 gap-4 flex-1" style={{ height: '266mm' }}>
+                      {chunkRecords.map((rec) => {
+                        const subtotalAmount = rec.totalAmount + (rec.discount || 0);
+                        const discountPercent = rec.discount && subtotalAmount > 0
+                          ? Math.round((rec.discount / subtotalAmount) * 100)
+                          : 0;
+                        return (
+                          <div 
+                            key={rec.id} 
+                            className="bg-white border-2 border-slate-300 rounded-3xl p-5 flex flex-col justify-between h-full box-border shadow-sm text-slate-900"
+                          >
+                            <div>
+                              <div className="flex justify-between items-center border-b border-dashed border-slate-200 pb-2 mb-3">
+                                <div className="flex flex-col text-left">
+                                  {printFieldVisibility.storeHeader ? (
+                                    <>
+                                      <span className="text-[10px] font-extrabold font-mono text-blue-600 tracking-wider">OFFICIAL RECEIPT</span>
+                                      <span className="text-[12px] font-black font-mono text-slate-800">NO. #{rec.srNo}</span>
+                                    </>
+                                  ) : (
+                                    <span className="text-[12px] font-black font-mono text-slate-800">#{rec.srNo}</span>
+                                  )}
+                                </div>
+                                {printFieldVisibility.paymentDetails && (
+                                  <div className="text-right">
+                                    <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest block">Issue Date</span>
+                                    <span className="text-[10px] font-bold font-mono text-slate-705">{rec.date}</span>
+                                  </div>
+                                )}
+                              </div>
+
+                              <div className="bg-slate-50 border border-slate-100 rounded-xl p-2.5 mb-3 flex justify-between items-center">
+                                <div className="text-left">
+                                  <span className="text-[8px] font-black text-slate-400 uppercase tracking-widest block">Student Name</span>
+                                  <h4 className="text-xs font-black text-slate-900 uppercase truncate max-w-[130px]">{rec.name}</h4>
+                                </div>
+                                <div className="text-right font-mono flex-shrink-0">
+                                  <span className="text-[8px] font-black text-slate-400 uppercase tracking-widest block">Class</span>
+                                  <span className="text-[10px] font-black bg-blue-100 text-blue-800 px-2 py-0.5 rounded border border-blue-200 inline-block">{rec.studentClass}</span>
+                                </div>
+                              </div>
+
+                              {printFieldVisibility.itemsBreakdown && (
+                                <div className="flex-1 min-h-[75px] max-h-[110px] overflow-hidden flex flex-col justify-start">
+                                  <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest block mb-1 text-left">Items & Breakdown</span>
+                                  <div className="space-y-1 overflow-hidden" style={{ maxHeight: '90px' }}>
+                                    {rec.items.map((item, idx) => (
+                                      <div key={item.id || idx} className="flex justify-between items-center text-[10px] border-b border-slate-50 pb-0.5 animate-fadeIn">
+                                        <span className="text-slate-700 font-bold truncate max-w-[140px] text-left">
+                                          &bull; {item.item} ({item.size})
+                                        </span>
+                                        <span className="font-mono text-slate-505 text-[9px] flex-shrink-0 text-right">
+                                          {item.qty} x ₹{item.rate}
+                                        </span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+
+                              {((printFieldVisibility.adminNotes && rec.notes) || (printFieldVisibility.customFields && rec.customData && Object.keys(rec.customData).length > 0)) && (
+                                <div className="bg-slate-50/50 rounded-lg p-2 mt-2 space-y-0.5 text-[8px] border border-slate-100 text-left">
+                                  {printFieldVisibility.adminNotes && rec.notes && (
+                                    <p className="text-slate-500 italic truncate">
+                                      Note: {rec.notes}
+                                    </p>
+                                  )}
+                                  {printFieldVisibility.customFields && rec.customData && Object.keys(rec.customData).filter(k => rec.customData[k] !== undefined && rec.customData[k] !== '').map((key) => {
+                                    const field = customFields?.find((f: any) => f.id === key);
+                                    const label = field ? field.label : key;
+                                    return (
+                                      <div key={key} className="flex justify-between font-mono text-[8px] text-slate-400">
+                                        <span className="text-left">{label}:</span>
+                                        <span className="font-bold text-slate-600 text-right">{String(rec.customData[key])}</span>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </div>
+
+                            <div className="border-t border-slate-200 pt-2 space-y-1.5 font-sans animate-fadeIn">
+                              {printFieldVisibility.paymentDetails && (() => {
+                                const isPaid = rec.paymentMode !== 'Pending' && (rec.paidAmount || 0) >= rec.totalAmount;
+                                const remainingBalance = Math.max(0, rec.totalAmount - (rec.paidAmount || 0));
+                                const statusLabel = isPaid ? 'Paid' : 'Pending';
+                                return (
+                                  <div className="flex justify-between items-center border-b border-dashed border-slate-100 pb-1.5 mb-1 text-[9px]">
+                                    <span className="font-black text-slate-400 uppercase tracking-widest text-left">Payment Status</span>
+                                    <div className="flex items-center gap-2">
+                                      <span className={`px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-wider ${
+                                        isPaid 
+                                          ? 'bg-emerald-100 text-emerald-800 border border-emerald-200' 
+                                          : 'bg-rose-100 text-rose-800 border border-rose-200'
+                                      }`}>
+                                        {statusLabel}
+                                      </span>
+                                      {printFieldVisibility.balancesOutstanding && remainingBalance > 0 && (
+                                        <span className="font-extrabold font-mono text-amber-600 text-[8px] tracking-tight bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
+                                          Bal: ₹{remainingBalance}
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              })()}
+
+                              <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[9px] font-mono text-slate-450 text-left">
+                                <div className="flex justify-between">
+                                  <span className="text-left">Subtotal:</span>
+                                  <span className="font-semibold text-slate-600 text-right">₹{subtotalAmount}</span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-left">Discount%:</span>
+                                  <span className={`text-right ${discountPercent > 0 ? "font-bold text-red-500" : ""}`}>
+                                    {discountPercent > 0 ? `${discountPercent}%` : '0%'}
+                                  </span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-left">Paid:</span>
+                                  <span className="font-bold text-emerald-600 text-right font-mono">₹{rec.paidAmount || 0}</span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-left">Method:</span>
+                                  <span className="font-bold uppercase text-slate-600 text-right">{rec.paymentMode}</span>
+                                </div>
+                              </div>
+
+                              <div className="flex justify-between items-center bg-slate-50 border border-slate-105 rounded-xl px-2.5 py-1.5 text-left">
+                                <div>
+                                  <span className="text-[7px] font-black uppercase tracking-wider text-slate-400 block">Total Payable</span>
+                                  <span className="text-[9px] font-bold text-slate-500 font-mono">
+                                    {printFieldVisibility.balancesOutstanding && Math.max(0, rec.totalAmount - (rec.paidAmount || 0)) > 0 
+                                      ? `Due: ₹${rec.totalAmount - (rec.paidAmount || 0)}` 
+                                      : 'Fully Paid'}
+                                  </span>
+                                </div>
+                                <span className="text-sm font-black font-mono text-slate-900 text-right">₹{rec.totalAmount}</span>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {Array.from({ length: Math.max(0, chunkSize - chunkRecords.length) }).map((_, idx) => (
+                        <div key={`empty-${idx}`} className="border-2 border-dashed border-slate-200 rounded-3xl bg-slate-50/10" />
+                      ))}
+                    </div>
+                  ) : (
+                    /* Tabular ledger view */
+                    <div className="flex flex-col justify-between flex-1 h-full text-slate-900">
+                      <div>
+                        {/* Title block */}
+                        <div className="border-b-2 border-slate-900 pb-3 mb-4 flex justify-between items-end">
+                          <div className="text-left">
+                            <h1 className="text-sm font-black uppercase text-slate-800 tracking-wider">Uniform Sales Transaction List</h1>
+                            <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mt-0.5">
+                              Spreadsheet Database Report &bull; Created {new Date().toLocaleDateString()}
+                            </p>
+                          </div>
+                          <div className="text-right font-mono">
+                            <span className="text-[8px] font-black text-slate-400 uppercase tracking-widest block">Spreadsheet Range</span>
+                            <span className="text-xs font-black text-slate-800">
+                              {activePageIndex * 15 + 1} - {Math.min((activePageIndex + 1) * 15, recordsToUse.length)} of {recordsToUse.length}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Spreadsheet view table */}
+                        <table className="w-full text-left" style={{ borderCollapse: 'collapse', fontSize: '9px' }}>
+                          <thead>
+                            <tr className="border-b border-slate-300 text-slate-400 uppercase text-[8px] font-black tracking-widest bg-slate-50/50">
+                              <th className="py-2 px-1 font-mono text-center">Sr. #</th>
+                              <th className="py-2 px-1 text-center">Date</th>
+                              <th className="py-2 px-2">Student Name</th>
+                              <th className="py-2 px-1 text-center font-sans">Class</th>
+                              <th className="py-2 px-2">Items Breakdown</th>
+                              <th className="py-2 px-1 text-right">Payment</th>
+                              <th className="py-2 px-2 text-right font-sans">Paid / Total</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100 bg-white">
+                            {chunkRecords.map((rec) => (
+                              <tr key={rec.id} className="text-slate-800 font-medium">
+                                <td className="py-2 px-1 font-mono font-bold text-center text-slate-500">#{rec.srNo}</td>
+                                <td className="py-2 px-1 text-center font-mono text-slate-400 text-[8px]">{rec.date}</td>
+                                <td className="py-2 px-2 font-bold uppercase truncate max-w-[120px] text-left">{rec.name}</td>
+                                <td className="py-2 px-1 text-center font-mono">
+                                  <span className="bg-slate-100 px-1.5 py-0.5 rounded text-[8px] border border-slate-200 inline-block">{rec.studentClass}</span>
+                                </td>
+                                <td className="py-2 px-2 text-[8px] text-slate-500 text-left">
+                                  <div className="max-w-[180px] truncate">
+                                    {rec.items.map(i => `${i.item} (${i.size}) x${i.qty}`).join(', ')}
+                                  </div>
+                                </td>
+                                <td className="py-2 px-1 text-right font-mono">
+                                  <span className={`text-[8px] font-black uppercase px-1 py-0.5 rounded inline-block ${
+                                    rec.paymentMode === 'Pending' ? 'text-amber-600 bg-amber-50' : 'text-emerald-600 bg-emerald-50'
+                                  }`}>
+                                    {rec.paymentMode}
+                                  </span>
+                                </td>
+                                <td className="py-2 px-2 text-right font-mono text-[8px]">
+                                  <span className="font-bold">₹{rec.paidAmount || 0}</span> / ₹{rec.totalAmount}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      <div className="border-t border-slate-300 pt-2 flex justify-between items-center text-[10px] font-bold font-mono text-slate-400 uppercase tracking-widest mt-2 flex-shrink-0">
+                        <span>{isCards ? 'Sales Ledger Invoice Cards' : 'Transaction Ledger Sheet'}</span>
+                        <span>Page {activePageIndex + 1} of {totalPages}</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Global actions row */}
+        <div className="p-6 bg-slate-950 border-t border-slate-800 flex flex-col sm:flex-row gap-3 justify-end items-center flex-shrink-0">
+          <button
+            onClick={onClose}
+            className="w-full sm:w-auto bg-slate-800 hover:bg-slate-700 text-slate-300 py-3.5 px-6 rounded-2xl text-xs font-black uppercase tracking-wider font-mono active:scale-95 transition"
+          >
+            Cancel Preview
+          </button>
+          
+          <button
+            onClick={() => {
+              onClose();
+              triggerDownloadPDF(pdfSelectIds);
+            }}
+            className="w-full sm:w-auto bg-blue-600 hover:bg-blue-700 text-white py-3.5 px-6 rounded-2xl text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 shadow-lg shadow-blue-500/20 active:scale-95 transition font-mono"
+          >
+            <FileDown size={14} /> Download PDF Blueprint
+          </button>
+
+          <button
+            onClick={() => {
+              onClose();
+              triggerPrint(pdfSelectIds);
+            }}
+            className="w-full sm:w-auto bg-emerald-600 hover:bg-emerald-700 text-white py-3.5 px-6 rounded-2xl text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20 active:scale-95 transition font-mono"
+          >
+            <Printer size={14} /> Confirm &amp; Print Document
+          </button>
         </div>
       </motion.div>
     </div>
