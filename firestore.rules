@@ -86,11 +86,13 @@ service cloud.firestore {
              data.date is string && data.date.size() <= 64 &&
              data.timestamp is string && data.timestamp.size() <= 64 &&
              data.paymentMode in ['UPI', 'Cash', 'Pending'] &&
-             (!('paidAmount' in data) || data.paidAmount is number) &&
-             (!('paymentDate' in data) || (data.paymentDate is string && data.paymentDate.size() <= 64)) &&
-             (!('notes' in data) || (data.notes is string && data.notes.size() <= 10000)) &&
-             (!('discountPercent' in data) || data.discountPercent is number) &&
-             (!('customData' in data) || data.customData is map);
+             (!('paidAmount' in data) || data.paidAmount == null || data.paidAmount is number) &&
+             (!('paymentDate' in data) || data.paymentDate == null || (data.paymentDate is string && data.paymentDate.size() <= 64)) &&
+             (!('notes' in data) || data.notes == null || (data.notes is string && data.notes.size() <= 10000)) &&
+             (!('discountPercent' in data) || data.discountPercent == null || data.discountPercent is number) &&
+             (!('discount' in data) || data.discount == null || data.discount is number) &&
+             (!('isArchived' in data) || data.isArchived == null || data.isArchived is bool) &&
+             (!('customData' in data) || data.customData == null || data.customData is map);
     }
 
     function isValidPricing(data) {
@@ -124,9 +126,10 @@ service cloud.firestore {
 
       // User-specific Sales
       match /sales/{saleId} {
-        allow read: if isSignedIn();
-        allow create: if (isEditor() || isAdmin()) && request.auth.token.email_verified == true && isValidSale(incoming());
-        allow update, delete: if isEditor() || isAdmin();
+        allow read: if isOwner(userId) || isEditor() || isAdmin();
+        allow create: if (isOwner(userId) || isEditor() || isAdmin()) && isValidSale(incoming());
+        allow update: if (isOwner(userId) || isEditor() || isAdmin()) && isValidSale(incoming());
+        allow delete: if isOwner(userId) || isEditor() || isAdmin();
       }
 
       // User-specific Settings

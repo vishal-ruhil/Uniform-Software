@@ -255,7 +255,15 @@ export default function App() {
   }, [isSidebarCollapsed]);
   const [pricingMode, setPricingMode] = useState<'prices' | 'inventory'>('prices');
   const [pricing, setPricing] = useState<Pricing>(DEFAULT_PRICING);
-  const [itemOrder, setItemOrder] = useState<string[]>([]);
+  const [itemOrder, setItemOrder] = useState<string[]>(() => Object.keys(DEFAULT_PRICING));
+
+  const orderedItemNames = useMemo(() => {
+    const keys = Object.keys(pricing);
+    if (!itemOrder || itemOrder.length === 0) return keys;
+    const ordered = itemOrder.filter(item => keys.includes(item));
+    const extra = keys.filter(item => !itemOrder.includes(item));
+    return [...ordered, ...extra];
+  }, [pricing, itemOrder]);
   const [records, setRecords] = useState<SaleRecord[]>([]);
   const [recordsToPrint, setRecordsToPrint] = useState<SaleRecord[]>([]);
   const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
@@ -1482,7 +1490,7 @@ export default function App() {
     
     try {
       const token = await getAccessToken(false).catch(() => getAccessToken(true));
-      const itemNames = Object.keys(pricing);
+      const itemNames = orderedItemNames;
 
       if (action === 'create' || action === 'update') {
         const rec = record || records.find(r => r.id === recordId);
@@ -1509,7 +1517,7 @@ export default function App() {
       const token = await getAccessToken(true);
       const spreadsheetId = await sheetService.createSpreadsheet(token, `Uniform Sales Ledger - ${new Date().toLocaleDateString()}`);
       
-      const itemNames = Object.keys(pricing);
+      const itemNames = orderedItemNames;
       const headers = sheetService.prepareHeaders(itemNames, customFields);
       await sheetService.setupSheetHeaders(token, spreadsheetId, headers);
 
@@ -1542,7 +1550,7 @@ export default function App() {
       const token = await getAccessToken(true);
       await sheetService.clearSheet(token, syncSettings.spreadsheetId);
       
-      const itemNames = Object.keys(pricing);
+      const itemNames = orderedItemNames;
       const headers = sheetService.prepareHeaders(itemNames, customFields);
       await sheetService.setupSheetHeaders(token, syncSettings.spreadsheetId, headers);
 
@@ -2023,7 +2031,7 @@ export default function App() {
       return;
     }
 
-    const itemNames = Object.keys(pricing);
+    const itemNames = orderedItemNames;
     
     // Create data rows
     const dataRows = filteredRecords.map(r => {
@@ -2113,49 +2121,194 @@ export default function App() {
     reader.onload = async (evt) => {
       try {
         const dataBuffer = evt.target?.result as ArrayBuffer;
-        const workbook = XLSX.read(dataBuffer, { type: 'buffer' });
+        // Parse dates as actual Dates where possible for high fidelity
+        const workbook = XLSX.read(dataBuffer, { type: 'buffer', cellDates: true });
         const sheetName = workbook.SheetNames[0];
         const worksheet = workbook.Sheets[sheetName];
         const data = XLSX.utils.sheet_to_json(worksheet) as any[];
 
-        const itemNames = Object.keys(pricing);
+        const itemNames = orderedItemNames;
         const timestamp = new Date().toISOString();
         
         const errors: any[] = [];
         const validRecords: SaleRecord[] = [];
+
+        // Helper: normalize keys for fuzzy matching
+        const normalizeKey = (k: string) => k.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+        // Helper: find value of a key in the row via synonym options
+        const getRowValueBySynonyms = (row: any, synonyms: string[]): any => {
+          const normSynonyms = synonyms.map(s => normalizeKey(s));
+          for (const key of Object.keys(row)) {
+            if (normSynonyms.includes(normalizeKey(key))) {
+              return row[key];
+            }
+          }
+          return undefined;
+        };
+
+        // Helper: find product item values like Half Pant_Size, Half Pant Qty, etc.
+        const findProductField = (row: any, itemName: string, fieldSuffix: 'Size' | 'Qty' | 'Price'): any => {
+          const targetNorm = normalizeKey(itemName + fieldSuffix);
+          for (const key of Object.keys(row)) {
+            if (normalizeKey(key) === targetNorm) {
+              return row[key];
+            }
+          }
+          // Fallback to exact or direct underscore check
+          return row[`${itemName}_${fieldSuffix}`];
+        };
+
+        // Helper: parse dates safely
+        const parseExcelDate = (val: any): string => {
+          if (!val) return new Date().toLocaleDateString('en-IN');
+          
+          if (typeof val === 'string' && /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(val.trim())) {
+            return val.trim();
+          }
+
+          if (val instanceof Date && !isNaN(val.getTime())) {
+            const d = val.getDate().toString().padStart(2, '0');
+            const m = (val.getMonth() + 1).toString().padStart(2, '0');
+            const y = val.getFullYear();
+            return `${d}/${m}/${y}`;
+          }
+
+          if (typeof val === 'number') {
+            try {
+              const date = new Date((val - 25569) * 86400 * 1000);
+              if (!isNaN(date.getTime())) {
+                const d = date.getUTCDate().toString().padStart(2, '0');
+                const m = (date.getUTCMonth() + 1).toString().padStart(2, '0');
+                const y = date.getUTCFullYear();
+                return `${d}/${m}/${y}`;
+              }
+            } catch {}
+          }
+
+          if (typeof val === 'string') {
+            const trimmed = val.trim();
+            const matchDMY = trimmed.match(/^(\d{1,2})[-./](\d{1,2})[-./](\d{4})$/);
+            if (matchDMY) {
+              const d = matchDMY[1].padStart(2, '0');
+              const m = matchDMY[2].padStart(2, '0');
+              const y = matchDMY[3];
+              return `${d}/${m}/${y}`;
+            }
+            
+            const matchYMD = trimmed.match(/^(\d{4})[-./](\d{1,2})[-./](\d{1,2})$/);
+            if (matchYMD) {
+              const y = matchYMD[1];
+              const m = matchYMD[2].padStart(2, '0');
+              const d = matchYMD[3].padStart(2, '0');
+              return `${d}/${m}/${y}`;
+            }
+
+            try {
+              const date = new Date(trimmed);
+              if (!isNaN(date.getTime())) {
+                const d = date.getDate().toString().padStart(2, '0');
+                const m = (date.getMonth() + 1).toString().padStart(2, '0');
+                const y = date.getFullYear();
+                return `${d}/${m}/${y}`;
+              }
+            } catch {}
+          }
+
+          return String(val);
+        };
+
+        // Helper: parse discount percent safely
+        const parseDiscountPercent = (val: any): number => {
+          if (val === undefined || val === null || val === '') return 0;
+          if (typeof val === 'number') {
+            if (val > 0 && val < 1) {
+              return Math.round(val * 100);
+            }
+            return val;
+          }
+          const str = String(val).trim();
+          if (str.endsWith('%')) {
+            const num = Number(str.slice(0, -1).trim());
+            return isNaN(num) ? 0 : num;
+          }
+          const num = Number(str);
+          return isNaN(num) ? 0 : num;
+        };
+
+        // Helper: parse payment mode safely
+        const parsePaymentMode = (val: any): PaymentMode => {
+          if (!val) return 'Pending';
+          const str = String(val).trim().toLowerCase();
+          if (str === 'upi' || str === 'gpay' || str === 'google pay' || str === 'phonepe' || str === 'paytm' || str === 'online' || str === 'bank' || str === 'transfer' || str === 'rtgs' || str === 'neft' || str === 'card') {
+            return 'UPI';
+          }
+          if (str === 'cash') {
+            return 'Cash';
+          }
+          if (str === 'pending') {
+            return 'Pending';
+          }
+          
+          const matched = (['UPI', 'Cash', 'Pending'] as PaymentMode[]).find(m => m.toLowerCase() === str);
+          if (matched) return matched;
+          return 'Pending';
+        };
+
+        // Helper: parse paid amount safely
+        const parsePaidAmount = (val: any): number | null => {
+          if (val === undefined || val === null || String(val).trim() === '') return null;
+          const num = Number(val);
+          return isNaN(num) ? null : num;
+        };
+
+        // Helper: parse student class safely
+        const parseStudentClass = (val: any): string => {
+          if (!val) return CLASSES[0];
+          const str = String(val).trim();
+          const matched = CLASSES.find(c => c.toLowerCase() === str.toLowerCase());
+          if (matched) return matched;
+          return str;
+        };
         
         data.forEach((row, index) => {
           const rowNum = index + 2;
-          const studentName = row["Student Name"];
-          const totalAmountRaw = row["Total Amount"];
-          const dateRaw = row["Date"];
+
+          // Skip completely empty rows
+          const rowKeys = Object.keys(row);
+          const hasAnyValue = rowKeys.some(k => row[k] !== undefined && row[k] !== null && String(row[k]).trim() !== "");
+          if (!hasAnyValue) {
+            return;
+          }
+
+          const studentName = getRowValueBySynonyms(row, ["Student Name", "Name", "Student", "Name of Student", "Full Name", "Student_Name"]);
+          const totalAmountRaw = getRowValueBySynonyms(row, ["Total Amount", "Total", "Grand Total", "Amount", "Total_Amount"]);
+          const dateRaw = getRowValueBySynonyms(row, ["Date", "Sale Date", "Transaction Date", "Date of Sale"]);
           
           if (!studentName) {
             errors.push({ row: rowNum, identifier: "Unknown", reason: "Missing Student Name", rawData: row });
             return;
           }
 
-          const totalAmount = Number(totalAmountRaw || 0);
-          if (isNaN(totalAmount)) {
-            errors.push({ row: rowNum, identifier: studentName, reason: `Invalid Total Amount: ${totalAmountRaw}`, rawData: row });
+          // Skip template helper rows (e.g. starts with "Ex: ")
+          if (String(studentName).trim().startsWith("Ex:")) {
             return;
           }
 
           const items: CartItem[] = [];
           itemNames.forEach(itemName => {
-            const sizeKey = `${itemName}_Size`;
-            const qtyKey = `${itemName}_Qty`;
-            const priceKey = `${itemName}_Price`;
+            const size = findProductField(row, itemName, 'Size');
+            const qtyRaw = findProductField(row, itemName, 'Qty');
+            const priceRaw = findProductField(row, itemName, 'Price');
             
-            const size = row[sizeKey];
-            const qty = Number(row[qtyKey] || 0);
-            const price = Number(row[priceKey] || 0);
+            const qty = isNaN(Number(qtyRaw)) ? 0 : Number(qtyRaw || 0);
+            const price = isNaN(Number(priceRaw)) ? 0 : Number(priceRaw || 0);
             
             if (qty > 0) {
               let rate = 0;
               if (qty > 0) rate = price / qty;
-              if (rate === 0 && pricing[itemName] && size && (pricing[itemName][size] as any)) {
-                rate = (pricing[itemName][size] as any).price || 0;
+              if (rate === 0 && pricing[itemName] && size && (pricing[itemName][String(size)] as any)) {
+                rate = (pricing[itemName][String(size)] as any).price || 0;
               }
 
               items.push({
@@ -2168,27 +2321,60 @@ export default function App() {
             }
           });
 
+          const discountPercentRaw = getRowValueBySynonyms(row, ["Discount %", "Discount", "Discount Percent", "Discount Percentage", "Discount_Percent", "Discount_Percentage", "DiscountRate", "Discount Rate"]);
+          const discountPercent = parseDiscountPercent(discountPercentRaw);
+
+          let totalAmount = isNaN(Number(totalAmountRaw)) ? 0 : Number(totalAmountRaw || 0);
+          if (totalAmount === 0 && items.length > 0) {
+            const computedTotal = items.reduce((sum, item) => sum + (item.qty * item.rate), 0);
+            totalAmount = computedTotal * (1 - (discountPercent / 100));
+          }
+
+          const parsedDate = parseExcelDate(dateRaw);
+
           const customData: Record<string, any> = {};
           customFields.forEach((f: any) => {
-            if (row[f.label] !== undefined) {
-              customData[f.id] = row[f.label];
+            const labelNorm = normalizeKey(f.label);
+            let foundVal = undefined;
+            for (const key of Object.keys(row)) {
+              if (normalizeKey(key) === labelNorm) {
+                foundVal = row[key];
+                break;
+              }
+            }
+            if (foundVal !== undefined) {
+              customData[f.id] = foundVal;
             }
           });
 
+          const srNoRaw = getRowValueBySynonyms(row, ["Sr. No.", "Sr No", "Serial Number", "SNo", "S.No.", "Sr_No", "S_No"]);
+          const srNo = isNaN(Number(srNoRaw)) ? (records.length + validRecords.length + 1) : (Number(srNoRaw) || (records.length + validRecords.length + 1));
+          
+          const paymentModeRaw = getRowValueBySynonyms(row, ["Payment Mode", "Payment", "Payment_Mode", "Mode", "Mode of Payment", "Mode_of_Payment"]);
+          const paymentMode = parsePaymentMode(paymentModeRaw);
+
+          const paidAmountRaw = getRowValueBySynonyms(row, ["Paid Amount", "Paid", "Amount Paid", "Paid_Amount", "Amount_Paid"]);
+          const paidAmount = parsePaidAmount(paidAmountRaw);
+
+          const paymentDateRaw = getRowValueBySynonyms(row, ["Payment Date", "Payment_Date", "Date of Payment", "Date_of_Payment"]);
+          const paymentDate = paymentDateRaw ? parseExcelDate(paymentDateRaw) : null;
+
+          const notesRaw = getRowValueBySynonyms(row, ["General Notes", "Notes", "Note", "General_Notes", "Comments", "Remarks", "Remarks/Notes"]);
+
           const newRecord: SaleRecord = {
             id: crypto.randomUUID(),
-            srNo: Number(row["Sr. No."]) || (records.length + validRecords.length + 1),
-            date: dateRaw || new Date().toLocaleDateString('en-IN'),
+            srNo,
+            date: parsedDate,
             timestamp,
             name: String(studentName),
-            studentClass: String(row["Class"] || CLASSES[0]),
+            studentClass: parseStudentClass(getRowValueBySynonyms(row, ["Class", "Grade", "Standard", "Student Class", "Student_Class"])),
             items,
             totalAmount,
-            discountPercent: Number(row["Discount %"] || 0),
-            paymentMode: (row["Payment Mode"] as PaymentMode) || 'Pending',
-            paidAmount: row["Paid Amount"] ? Number(row["Paid Amount"]) : null,
-            paymentDate: row["Payment Date"] || null,
-            notes: row["General Notes"] || "",
+            discountPercent,
+            paymentMode,
+            paidAmount,
+            paymentDate,
+            notes: notesRaw ? String(notesRaw) : "",
             customData
           };
 
@@ -2255,7 +2441,7 @@ export default function App() {
   };
 
   const downloadTemplate = () => {
-    const itemNames = Object.keys(pricing);
+    const itemNames = orderedItemNames;
     const headers: any = {
       "Sr. No.": "Ex: 1",
       "Date": new Date().toLocaleDateString('en-IN'),
@@ -3802,6 +3988,7 @@ export default function App() {
                 downloadTemplate={downloadTemplate}
                 grandTotal={filteredRecords.reduce((sum, r) => sum + r.totalAmount, 0)}
                 pricing={pricing}
+                itemOrder={itemOrder}
                 can={can}
                 getNextSrNo={getNextSrNo}
                 setMsg={setMsg}
@@ -7787,6 +7974,7 @@ function LedgerSection({
   customFields, 
   grandTotal, 
   pricing,
+  itemOrder,
   can,
   getNextSrNo,
   setMsg,
@@ -7828,7 +8016,13 @@ function LedgerSection({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [showImportGuideModal, showExportModal, showQuickForm, isPrintDropdownOpen, isExportDropdownOpen]);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const itemNames = Object.keys(pricing);
+  const itemNames = useMemo(() => {
+    const keys = Object.keys(pricing);
+    if (!itemOrder || itemOrder.length === 0) return keys;
+    const ordered = itemOrder.filter(item => keys.includes(item));
+    const extra = keys.filter(item => !itemOrder.includes(item));
+    return [...ordered, ...extra];
+  }, [pricing, itemOrder]);
   const [bulkDiscount, setBulkDiscount] = useState('0');
   const [exportSettings, setExportSettings] = useState<any>({
     format: 'xlsx',
